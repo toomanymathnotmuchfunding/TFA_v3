@@ -21,7 +21,7 @@ mkdir -p logs checkpoints/aft_runs
 # Load Miniforge module on Engaging worker node
 module load miniforge
 source ~/.bashrc
-conda activate tfa_exp
+conda activate msm_env
 
 # Define the 12-arm factorial matrix (6 architectures x 2 target policies)
 ARCHS=(

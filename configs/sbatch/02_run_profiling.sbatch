@@ -20,7 +20,7 @@ mkdir -p logs data results
 # Load Miniforge module on Engaging worker node
 module load miniforge
 source ~/.bashrc
-conda activate tfa_exp
+conda activate msm_env
 
 echo "=== Phase 2 Step 1: Extract Domain Pools ==="
 python scripts/02a_extract_data.py \

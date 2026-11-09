@@ -20,7 +20,7 @@ mkdir -p logs results
 # Load Miniforge module on Engaging worker node
 module load miniforge
 source ~/.bashrc
-conda activate tfa_exp
+conda activate msm_env
 
 echo "=== Phase 4: Evaluating All Checkpoints and Running Regressions ==="
 python scripts/04_evaluate_and_regress.py \

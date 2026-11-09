@@ -20,7 +20,7 @@ mkdir -p logs checkpoints
 # Load Miniforge module on Engaging worker node
 module load miniforge
 source ~/.bashrc
-conda activate tfa_exp
+conda activate msm_env
 
 echo "=== Phase 1 Step 1: Conversational SFT ==="
 python scripts/01_conversational_sft.py \
