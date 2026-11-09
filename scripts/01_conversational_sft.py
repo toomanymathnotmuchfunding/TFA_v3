@@ -85,6 +85,23 @@ def main():
 
     print(f"Loading tokenizer for {args.model_id}...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
+
+    # Fallback: Llama-3 base models lack chat_template in tokenizer_config.json
+    if tokenizer.chat_template is None:
+        tokenizer.chat_template = (
+            "{% set loop_messages = messages %}"
+            "{% for message in loop_messages %}"
+            "{% set content = '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n' + message['content'] | trim + '<|eot_id|>' %}"
+            "{{ content }}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}"
+            "{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}"
+            "{% endif %}"
+        )
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
