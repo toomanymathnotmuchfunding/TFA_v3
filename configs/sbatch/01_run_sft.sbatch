@@ -12,9 +12,14 @@
 
 set -euo pipefail
 
+# Ensure working directory is repository root
+cd "${SLURM_SUBMIT_DIR:-.}"
+
 mkdir -p logs checkpoints
 
-source ~/.zshrc || source ~/.bashrc
+# Load Miniforge module on Engaging worker node
+module load miniforge
+source ~/.bashrc
 conda activate tfa_exp
 
 echo "=== Phase 1 Step 1: Conversational SFT ==="

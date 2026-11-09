@@ -13,9 +13,14 @@
 
 set -euo pipefail
 
+# Ensure working directory is repository root
+cd "${SLURM_SUBMIT_DIR:-.}"
+
 mkdir -p logs checkpoints/aft_runs
 
-source ~/.zshrc || source ~/.bashrc
+# Load Miniforge module on Engaging worker node
+module load miniforge
+source ~/.bashrc
 conda activate tfa_exp
 
 # Define the 12-arm factorial matrix (6 architectures x 2 target policies)
