@@ -2,7 +2,7 @@
 #SBATCH --job-name=tfa_p3_aft
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --error=logs/%x_%A_%a.err
-#SBATCH --partition=sched_mit_psfc_gpu
+#SBATCH --partition=mit_normal_gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1

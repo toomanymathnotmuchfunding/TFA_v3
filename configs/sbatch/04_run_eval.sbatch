@@ -2,7 +2,7 @@
 #SBATCH --job-name=tfa_p4_eval
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
-#SBATCH --partition=sched_mit_psfc_gpu
+#SBATCH --partition=mit_normal_gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
