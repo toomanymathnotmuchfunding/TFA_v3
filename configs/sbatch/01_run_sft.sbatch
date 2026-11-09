@@ -1,26 +1,30 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #SBATCH --job-name=tfa_p1_sft
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
 #SBATCH --partition=mit_normal_gpu
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:1
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
+#SBATCH --mem=64G
+#SBATCH --gres=gpu:1
 #SBATCH --time=04:00:00
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 
-set -euo pipefail
+set -e
 
-# Ensure working directory is repository root
-cd "${SLURM_SUBMIT_DIR:-.}"
-
+PROJECT_DIR="$SLURM_SUBMIT_DIR"
+cd "$PROJECT_DIR"
 mkdir -p logs checkpoints
 
-# Load Miniforge module on Engaging worker node
-module load miniforge
-source ~/.bashrc
+# --- Robust Cluster Environment Activation ---
+if ! command -v conda &> /dev/null; then
+    module load miniforge 2>/dev/null || module load anaconda3 2>/dev/null || true
+fi
+eval "$(conda shell.bash hook)"
 conda activate msm_env
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# ---------------------------------------------
 
 echo "=== Phase 1 Step 1: Conversational SFT ==="
 python scripts/01_conversational_sft.py \

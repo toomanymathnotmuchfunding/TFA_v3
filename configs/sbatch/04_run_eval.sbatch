@@ -1,26 +1,30 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #SBATCH --job-name=tfa_p4_eval
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
 #SBATCH --partition=mit_normal_gpu
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:1
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
+#SBATCH --mem=64G
+#SBATCH --gres=gpu:1
 #SBATCH --time=02:00:00
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 
-set -euo pipefail
+set -e
 
-# Ensure working directory is repository root
-cd "${SLURM_SUBMIT_DIR:-.}"
-
+PROJECT_DIR="$SLURM_SUBMIT_DIR"
+cd "$PROJECT_DIR"
 mkdir -p logs results
 
-# Load Miniforge module on Engaging worker node
-module load miniforge
-source ~/.bashrc
+# --- Robust Cluster Environment Activation ---
+if ! command -v conda &> /dev/null; then
+    module load miniforge 2>/dev/null || module load anaconda3 2>/dev/null || true
+fi
+eval "$(conda shell.bash hook)"
 conda activate msm_env
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# ---------------------------------------------
 
 echo "=== Phase 4: Evaluating All Checkpoints and Running Regressions ==="
 python scripts/04_evaluate_and_regress.py \
