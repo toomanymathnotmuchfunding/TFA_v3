@@ -1,0 +1,21 @@
+# Environment & Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+*.pt
+*.bin
+*.safetensors
+
+# Data & Model Weights
+data/
+checkpoints/
+logs/
+
+# Results (keep code clean, commit CSVs manually if desired)
+results/*.csv
+results/*.json
+
+# OS files
+.DS_Store
