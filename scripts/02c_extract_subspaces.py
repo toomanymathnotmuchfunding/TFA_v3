@@ -1,87 +1,113 @@
 """
-scripts/02b_profile_b0.py
+scripts/02c_extract_subspaces.py
 
-Computes baseline bias under the frozen merged reference model:
-    b0(x) = log pi_ref(y_l | x) - log pi_ref(y_w | x)
-
-Performs greedy state selection on Domain A:
-  - Slices the top omega_size prompts with highest b0 into data/omega_train.jsonl
-  - Saves the remaining Domain A prompts to data/domain_A_heldout.jsonl
-  - Annotates Domain B with b0 and saves to data/domain_B_ood.jsonl
+Phase 2 Step 3: Spectral Decomposition of Representation Covariance R_Omega.
+Captures activations at target_layer (v_proj input) for prompt-response pairs.
+Computes:
+  - Delta h(x) = h(rejected) - h(chosen)
+  - Empirical representation covariance: R_Omega = E[Delta h Delta h^T]
+  - SVD / Eigendecomposition to extract:
+      1. V_topk: Top-k eigenvectors of R_Omega (k x d_in)
+      2. v_shared: Leading principal component across domains
+      3. v_diff: Leading differential component between Domain A and Domain B
+Saves results dictionary to --output_file (data/spectral_subspaces.pt).
 """
 
 import os
 import json
 import argparse
 import torch
-import pandas as pd
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Extract spectral subspaces for R_Omega")
-    parser.add_argument("--ref_model_path", type=str, required=True, help="Path to reference merged model")
-    parser.add_argument("--data_dir", type=str, default="data", help="Directory containing dataset jsonl files")
-    parser.add_argument("--results_dir", type=str, default="results", help="Directory containing profiling results")
-    parser.add_argument("--omega_size", type=int, default=100, help="Number of samples to select for Omega")
-    parser.add_argument("--target_layer", type=int, default=16, help="Target transformer layer for representation extraction")
-    parser.add_argument("--rank_k", type=int, default=4, help="Rank of spectral decomposition subspace")
-    parser.add_argument("--output_file", type=str, default="data/spectral_subspaces.pt", help="Path to save decomposed subspaces")
+    parser.add_argument("--ref_model_path", type=str, default="checkpoints/llama3_1_8b_sft_merged")
+    parser.add_argument("--data_dir", type=str, default="data")
+    parser.add_argument("--results_dir", type=str, default="results")
+    parser.add_argument("--omega_size", type=int, default=100)
+    parser.add_argument("--target_layer", type=int, default=16)
+    parser.add_argument("--rank_k", type=int, default=4)
+    parser.add_argument("--output_file", type=str, default="data/spectral_subspaces.pt")
     return parser.parse_args()
 
 
-def compute_sequence_logp(model, tokenizer, prompt: str, response: str) -> float:
-    prompt_str = (
-        f"<|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|>"
-        f"<|start_header_id|>assistant<|end_header_id|>\n\n"
-    )
-    full_str = prompt_str + response + "<|eot_id|>"
+class RepresentationExtractor:
+    def __init__(self, model, target_layer):
+        self.model = model
+        self.target_layer = target_layer
+        self.captured_hidden = None
+        self._hook_handle = None
+        self._register_hook()
 
-    enc_prompt = tokenizer(prompt_str, return_tensors="pt").input_ids.to(model.device)
-    enc_full = tokenizer(full_str, return_tensors="pt").input_ids.to(model.device)
+    def _register_hook(self):
+        # Target the input to the v_proj module in target_layer
+        layer_module = self.model.model.layers[self.target_layer].self_attn.v_proj
 
-    prompt_len = enc_prompt.shape[1]
-    labels = enc_full.clone()
-    labels[:, :prompt_len] = -100
+        def hook_fn(module, input, output):
+            # input[0] shape: (batch_size, seq_len, hidden_dim)
+            self.captured_hidden = input[0].detach()
 
-    with torch.no_grad():
-        outputs = model(enc_full, labels=labels)
-        resp_token_count = (labels != -100).sum().item()
-        total_logp = -outputs.loss.item() * resp_token_count
+        self._hook_handle = layer_module.register_forward_hook(hook_fn)
 
-    return total_logp / max(1, resp_token_count)
+    def remove(self):
+        if self._hook_handle is not None:
+            self._hook_handle.remove()
 
 
-def score_domain(model, tokenizer, input_path: str, desc: str):
-    with open(input_path, "r", encoding="utf-8") as f:
-        records = [json.loads(line) for line in f]
+def extract_delta_h(model, tokenizer, extractor, prompt, chosen, rejected):
+    """
+    Computes mean token representation difference between rejected and chosen responses.
+    Delta h = h_rejected - h_chosen (averaged over response tokens)
+    """
+    def get_rep(response):
+        prompt_str = (
+            f"<|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|>"
+            f"<|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
+        full_str = prompt_str + response + "<|eot_id|>"
 
-    scored = []
-    for item in tqdm(records, desc=desc):
-        logp_w = compute_sequence_logp(model, tokenizer, item["prompt"], item["chosen"])
-        logp_l = compute_sequence_logp(model, tokenizer, item["prompt"], item["rejected"])
-        b0 = logp_l - logp_w
+        enc_prompt = tokenizer(prompt_str, return_tensors="pt").input_ids.to(model.device)
+        enc_full = tokenizer(full_str, return_tensors="pt").input_ids.to(model.device)
+        prompt_len = enc_prompt.shape[1]
 
-        row = dict(item)
-        row["logp_chosen"] = logp_w
-        row["logp_rejected"] = logp_l
-        row["b0"] = float(b0)
-        scored.append(row)
+        with torch.no_grad():
+            model(enc_full)
+            # Extractor captured input to v_proj: (1, seq_len, hidden_dim)
+            resp_hidden = extractor.captured_hidden[:, prompt_len:, :]
+            mean_hidden = resp_hidden.mean(dim=1).squeeze(0)  # (hidden_dim,)
+        return mean_hidden
 
-    return scored
+    h_w = get_rep(chosen)
+    h_l = get_rep(rejected)
+    return (h_l - h_w).cpu()  # Delta h(x)
+
+
+def load_jsonl(path, limit=None):
+    items = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            items.append(json.loads(line))
+            if limit and len(items) >= limit:
+                break
+    return items
 
 
 def main():
     args = parse_args()
-    os.makedirs(args.results_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(args.output_file) or ".", exist_ok=True)
 
-    path_A = os.path.join(args.data_dir, "domain_A_pool.jsonl")
-    path_B = os.path.join(args.data_dir, "domain_B_ood.jsonl")
+    omega_path = os.path.join(args.data_dir, "omega_train.jsonl")
+    domain_b_path = os.path.join(args.data_dir, "domain_B_ood.jsonl")
 
-    if not os.path.exists(path_A) or not os.path.exists(path_B):
-        raise FileNotFoundError(f"Missing input pools in {args.data_dir}. Run 02a_extract_data.py first.")
+    if not os.path.exists(omega_path) or not os.path.exists(domain_b_path):
+        raise FileNotFoundError("Missing omega_train.jsonl or domain_B_ood.jsonl in data_dir.")
 
-    print(f"Loading reference model: {args.ref_model_path} in bfloat16...")
+    omega_data = load_jsonl(omega_path, limit=args.omega_size)
+    domain_b_data = load_jsonl(domain_b_path, limit=len(omega_data))
+
+    print(f"Loading reference model from {args.ref_model_path}...")
     tokenizer = AutoTokenizer.from_pretrained(args.ref_model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -93,66 +119,72 @@ def main():
     )
     model.eval()
 
-    print("Scoring baseline bias b0 on Domain A...")
-    scored_A = score_domain(model, tokenizer, path_A, desc="Domain A Profiling")
+    extractor = RepresentationExtractor(model, args.target_layer)
 
-    print("Scoring baseline bias b0 on Domain B...")
-    scored_B = score_domain(model, tokenizer, path_B, desc="Domain B Profiling")
+    print(f"Extracting Delta h over Omega (Domain A, N={len(omega_data)})...")
+    deltas_A = []
+    for item in tqdm(omega_data, desc="Extracting Omega Reps"):
+        dh = extract_delta_h(model, tokenizer, extractor, item["prompt"], item["chosen"], item["rejected"])
+        deltas_A.append(dh)
+    H_A = torch.stack(deltas_A, dim=0).float()  # (N_A, d)
 
-    # Greedy sort on Domain A descending by initial misalignment b0
-    scored_A_sorted = sorted(scored_A, key=lambda x: x["b0"], reverse=True)
-    omega_train = scored_A_sorted[: args.omega_size]
-    domain_A_heldout = scored_A_sorted[args.omega_size :]
+    print(f"Extracting Delta h over Domain B sample (N={len(domain_b_data)})...")
+    deltas_B = []
+    for item in tqdm(domain_b_data, desc="Extracting Domain B Reps"):
+        dh = extract_delta_h(model, tokenizer, extractor, item["prompt"], item["chosen"], item["rejected"])
+        deltas_B.append(dh)
+    H_B = torch.stack(deltas_B, dim=0).float()  # (N_B, d)
 
-    out_omega = os.path.join(args.data_dir, "omega_train.jsonl")
-    out_heldout = os.path.join(args.data_dir, "domain_A_heldout.jsonl")
-    out_b_ood = os.path.join(args.data_dir, "domain_B_ood.jsonl")
+    extractor.remove()
 
-    with open(out_omega, "w", encoding="utf-8") as f:
-        for r in omega_train:
-            f.write(json.dumps(r) + "\n")
+    print("Computing covariance matrix R_Omega and spectral decomposition...")
+    # Empirical covariance R_Omega = (H_A^T * H_A) / N
+    N_A, d = H_A.shape
+    R_Omega = torch.mm(H_A.t(), H_A) / N_A  # (d, d)
 
-    with open(out_heldout, "w", encoding="utf-8") as f:
-        for r in domain_A_heldout:
-            f.write(json.dumps(r) + "\n")
+    # Eigendecomposition of symmetric positive semi-definite matrix
+    eigenvalues, eigenvectors = torch.linalg.eigh(R_Omega)
+    # eigh returns ascending order; sort descending
+    idx = torch.argsort(eigenvalues, descending=True)
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
 
-    with open(out_b_ood, "w", encoding="utf-8") as f:
-        for r in scored_B:
-            f.write(json.dumps(r) + "\n")
+    # Top-k spectral subspace: (k, d)
+    V_topk = eigenvectors[:, :args.rank_k].t().contiguous()
 
-    # Export distribution diagnostics
-    summary = [
-        {
-            "Split": "Omega (Train, Top b0)",
-            "Count": len(omega_train),
-            "Mean_b0": pd.Series([x["b0"] for x in omega_train]).mean(),
-            "Std_b0": pd.Series([x["b0"] for x in omega_train]).std(),
-            "Min_b0": pd.Series([x["b0"] for x in omega_train]).min(),
-            "Max_b0": pd.Series([x["b0"] for x in omega_train]).max(),
-        },
-        {
-            "Split": "Domain A Heldout",
-            "Count": len(domain_A_heldout),
-            "Mean_b0": pd.Series([x["b0"] for x in domain_A_heldout]).mean(),
-            "Std_b0": pd.Series([x["b0"] for x in domain_A_heldout]).std(),
-            "Min_b0": pd.Series([x["b0"] for x in domain_A_heldout]).min(),
-            "Max_b0": pd.Series([x["b0"] for x in domain_A_heldout]).max(),
-        },
-        {
-            "Split": "Domain B OOD",
-            "Count": len(scored_B),
-            "Mean_b0": pd.Series([x["b0"] for x in scored_B]).mean(),
-            "Std_b0": pd.Series([x["b0"] for x in scored_B]).std(),
-            "Min_b0": pd.Series([x["b0"] for x in scored_B]).min(),
-            "Max_b0": pd.Series([x["b0"] for x in scored_B]).max(),
-        },
-    ]
+    # Shared leading direction: leading eigenvector of R_Omega
+    v_shared = eigenvectors[:, 0].contiguous()
+    v_shared = v_shared / torch.norm(v_shared)
 
-    df_summary = pd.DataFrame(summary)
-    summary_path = os.path.join(args.results_dir, "initial_b0_stats.csv")
-    df_summary.to_csv(summary_path, index=False)
-    print(f"\nSaved b0 metrics to {summary_path}")
-    print(df_summary.to_string(index=False))
+    # Difference direction: mean shift vector (mu_A - mu_B) projected orthogonal to v_shared
+    mu_A = H_A.mean(dim=0)
+    mu_B = H_B.mean(dim=0)
+    v_diff_raw = mu_A - mu_B
+    # Orthogonalize against v_shared: v_diff = v_diff - (v_diff . v_shared) v_shared
+    proj = torch.dot(v_diff_raw, v_shared) * v_shared
+    v_diff = v_diff_raw - proj
+    if torch.norm(v_diff) > 1e-6:
+        v_diff = v_diff / torch.norm(v_diff)
+    else:
+        # Fallback to second principal eigenvector if means are collinear
+        v_diff = eigenvectors[:, 1].contiguous()
+        v_diff = v_diff / torch.norm(v_diff)
+
+    subspace_payload = {
+        "v_shared": v_shared.cpu(),
+        "v_diff": v_diff.cpu(),
+        "V_topk": V_topk.cpu(),
+        "eigenvalues": eigenvalues[:args.rank_k].cpu(),
+        "target_layer": args.target_layer,
+        "rank_k": args.rank_k,
+    }
+
+    torch.save(subspace_payload, args.output_file)
+    print(f"\nSuccessfully extracted spectral subspaces!")
+    print(f"  v_shared norm: {torch.norm(v_shared):.4f} | shape: {list(v_shared.shape)}")
+    print(f"  v_diff norm:   {torch.norm(v_diff):.4f} | shape: {list(v_diff.shape)}")
+    print(f"  V_topk shape:  {list(V_topk.shape)}")
+    print(f"  Saved to:      {args.output_file}")
 
 
 if __name__ == "__main__":
