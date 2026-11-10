@@ -33,16 +33,38 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for response sampling.")
     return parser.parse_args()
 
-def extract_matched_pairs(dataset, categories_csv, max_pairs, seed=42):
-    rng = random.Random(seed)
-    target_cats = {c.strip() for c in categories_csv.split(",") if c.strip()}
-
+def _collect_unsafe_by_prompt(dataset, keys):
+    """Return prompt -> [unsafe responses] for rows flagged under any of `keys`."""
     unsafe_by_prompt = defaultdict(list)
     for row in dataset:
-        if not row["is_safe"]:
-            row_cats = row.get("category", {})
-            if any(row_cats.get(c, False) for c in target_cats):
-                unsafe_by_prompt[row["prompt"].strip()].append(row["response"].strip())
+        if row["is_safe"]:
+            continue
+        row_cats = row.get("category", {})
+        if any(bool(row_cats.get(k, False)) for k in keys):
+            unsafe_by_prompt[row["prompt"].strip()].append(row["response"].strip())
+    return unsafe_by_prompt
+
+
+def extract_matched_pairs(dataset, categories_csv, max_pairs, seed=42):
+    rng = random.Random(seed)
+
+    # BeaverTails stores the full comma-containing string as ONE category key,
+    # e.g. "financial_crime,property_crime,theft". Try exact match first.
+    whole_key = categories_csv.strip()
+    unsafe_by_prompt = _collect_unsafe_by_prompt(dataset, {whole_key})
+
+    if not unsafe_by_prompt:
+        # Fallback: some future schema might split on commas. Try that form too.
+        split_keys = {c.strip() for c in categories_csv.split(",") if c.strip()}
+        if split_keys != {whole_key}:
+            print(f"  Exact key '{whole_key}' found nothing; trying split form {sorted(split_keys)}...")
+            unsafe_by_prompt = _collect_unsafe_by_prompt(dataset, split_keys)
+
+    if not unsafe_by_prompt:
+        raise RuntimeError(
+            f"No rows matched category key '{whole_key}' (or split form). "
+            f"Confirm the key exists in dataset['category'].keys()."
+        )
 
     target_prompts = set(unsafe_by_prompt.keys())
     safe_by_prompt = defaultdict(list)
@@ -63,16 +85,12 @@ def extract_matched_pairs(dataset, categories_csv, max_pairs, seed=42):
                 break
     return pairs
 
-
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
     print(f"Loading {args.dataset_name} ({args.dataset_split})...")
     ds = load_dataset(args.dataset_name, split=args.dataset_split)
-
-
-    
 
     print(f"\n--- Extracting Domain A ---")
     domain_a_pool = extract_matched_pairs(ds, args.domain_a_category, args.max_pairs_per_domain, seed=args.seed)
