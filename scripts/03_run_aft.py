@@ -21,8 +21,8 @@ import argparse
 import torch
 import torch.nn.functional as F
 from datasets import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from trl import DPOTrainer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import DPOConfig, DPOTrainer
 from peft import LoraConfig, get_peft_model
 
 
@@ -43,7 +43,7 @@ def parse_args():
     parser.add_argument(
         "--directions_path",
         type=str,
-        default="data/domain_directions.pt",
+        default="data/spectral_subspaces.pt",
         help="Path to precomputed subspace projection vectors",
     )
     parser.add_argument(
@@ -111,68 +111,11 @@ def parse_args():
     return parser.parse_args()
 
 
-class CustomMarginDPOTrainer(DPOTrainer):
-    """
-    Subclasses TRL's DPOTrainer to apply dynamic sample-level margin offsets M(x).
-    Loss formulation:
-      L = -E [ log sigma( beta * (log pi(y_w|x)/pi_ref(y_w|x) - log pi(y_l|x)/pi_ref(y_l|x)) - M(x) ) ]
-    """
-    def get_batch_loss_metrics(self, model, batch, train_eval="train"):
-        (
-            policy_chosen_logps,
-            policy_rejected_logps,
-            reference_chosen_logps,
-            reference_rejected_logps,
-        ) = self._get_batch_logps(model, batch)
-
-        pi_logratios = policy_chosen_logps - policy_rejected_logps
-        ref_logratios = reference_chosen_logps - reference_rejected_logps
-        logits = pi_logratios - ref_logratios
-
-        # Pull dynamic margin tensor from formatted batch
-        margins = batch["margin"]
-        losses = -F.logsigmoid(self.beta * logits - margins)
-
-        metrics = {
-            f"{train_eval}_loss": losses.mean().item(),
-            f"{train_eval}_logits_mean": logits.mean().item(),
-            f"{train_eval}_margins_mean": margins.mean().item(),
-        }
-        return losses.mean(), metrics
-
-
-def format_dataset(jsonl_path, target_type, beta, omega):
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        raw_items = [json.loads(line) for line in f]
-
-    formatted = []
-    multiplier = 1.0 if target_type == "zero" else (1.0 + omega)
-
-    for item in raw_items:
-        prompt_str = (
-            f"<|start_header_id|>user<|end_header_id|>\n\n{item['prompt']}<|eot_id|>"
-            f"<|start_header_id|>assistant<|end_header_id|>\n\n"
-        )
-        chosen_str = item["chosen"] + "<|eot_id|>"
-        rejected_str = item["rejected"] + "<|eot_id|>"
-
-        b0_val = float(item["b0"])
-        # Dynamic margin: M(x) = beta * multiplier * max(0, b0(x))
-        margin = beta * multiplier * max(0.0, b0_val)
-
-        formatted.append({
-            "prompt": prompt_str,
-            "chosen": chosen_str,
-            "rejected": rejected_str,
-            "margin": margin,
-        })
-
-    return Dataset.from_list(formatted)
-
-
-# Inside scripts/03_run_aft.py:
-
 class RobustMarginDPOTrainer(DPOTrainer):
+    """
+    Subclasses TRL's DPOTrainer to apply dynamic sample-level margin offsets M(x)
+    and guarantee frozen-A isolation from the optimizer.
+    """
     def __init__(self, *args, frozen_a=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.frozen_a = frozen_a
@@ -216,7 +159,8 @@ class RobustMarginDPOTrainer(DPOTrainer):
         ref_logratios = reference_chosen_logps - reference_rejected_logps
         logits = pi_logratios - ref_logratios
 
-        margins = batch["margin"]
+        # Device and shape-safe margin extraction
+        margins = torch.as_tensor(batch["margin"], device=logits.device, dtype=logits.dtype).view_as(logits)
         losses = -F.logsigmoid(self.beta * logits - margins)
 
         metrics = {
@@ -227,30 +171,39 @@ class RobustMarginDPOTrainer(DPOTrainer):
         return losses.mean(), metrics
 
 
-def inject_and_configure_lora(model, arch, directions_path, target_layer, rank_k=4):
-    if arch == "fft":
-        return model
+def format_dataset(jsonl_path, target_type, beta, omega):
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        raw_items = [json.loads(line) for line in f]
 
-    if arch == "lora_spectral_k":
-        # Multi-rank adapter aligned with the top-k eigendirections of R_Omega
-        peft_config = LoraConfig(
-            r=rank_k,
-            lora_alpha=rank_k * 2,
-            target_modules=["v_proj"],
-            layers_to_transform=[target_layer],
-            lora_dropout=0.0,
-            bias="none",
-            task_type="CAUSAL_LM",
+    formatted = []
+    multiplier = 1.0 if target_type == "zero" else (1.0 + omega)
+
+    for item in raw_items:
+        prompt_str = (
+            f"<|start_header_id|>user<|end_header_id|>\n\n{item['prompt']}<|eot_id|>"
+            f"<|start_header_id|>assistant<|end_header_id|>\n\n"
         )
-        model = get_peft_model(model, peft_config)
-        spectral_data = torch.load(directions_path, map_location="cpu")
-        V_topk = spectral_data["V_topk"].float()  # (k, d_in)
+        chosen_str = item["chosen"] + "<|eot_id|>"
+        rejected_str = item["rejected"] + "<|eot_id|>"
 
-        for name, module in model.named_modules():
-            if hasattr(module, "lora_A") and str(target_layer) in name:
-                with torch.no_grad():
-                    module.lora_A["default"].weight.copy_(V_topk)
-                print(f"Initialized {name}.lora_A with top-{rank_k} spectral eigenvectors.")
+        b0_val = float(item.get("b0", 0.0))
+        # Dynamic margin: M(x) = beta * multiplier * max(0, b0(x))
+        margin = beta * multiplier * max(0.0, b0_val)
+
+        formatted.append({
+            "prompt": prompt_str,
+            "chosen": chosen_str,
+            "rejected": rejected_str,
+            "margin": margin,
+        })
+
+    return Dataset.from_list(formatted)
+
+
+def inject_and_configure_lora(model, arch, directions_path, target_layer):
+    if arch == "fft":
+        for p in model.parameters():
+            p.requires_grad = True
         return model
 
     if arch == "lora4":
@@ -286,10 +239,7 @@ def inject_and_configure_lora(model, arch, directions_path, target_layer, rank_k
                 module.lora_A["default"].weight.copy_(v_vec.unsqueeze(0))
 
             if "frozen" in arch:
-                # 1. Disable PyTorch autograd tracking
                 module.lora_A["default"].weight.requires_grad = False
-                
-                # 2. Add zero-gradient backward hook as a fail-safe
                 def make_zero_hook():
                     return lambda grad: torch.zeros_like(grad)
                 module.lora_A["default"].weight.register_hook(make_zero_hook())
@@ -310,6 +260,7 @@ def main():
         lr = 1e-5 if args.arch == "fft" else 5e-4
 
     print(f"Preparing Margin-DPO: Arch = {args.arch} | Target = {args.target} (omega = {args.omega})")
+    print(f"Learning Rate: {lr} | Output Directory: {args.output_dir}")
     print(f"Loading reference model from: {args.ref_model_path}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.ref_model_path)
@@ -335,39 +286,43 @@ def main():
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Trainable Parameters: {trainable_params:,} / {total_params:,} ({100 * trainable_params / total_params:.4f}%)")
 
-    training_args = TrainingArguments(
+    training_args = DPOConfig(
         output_dir=args.output_dir,
+        num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum_steps,
         learning_rate=lr,
-        lr_scheduler_type="cosine",
-        warmup_ratio=0.05,
-        num_train_epochs=args.epochs,
-        logging_steps=5,
-        save_strategy="no",
+        logging_steps=10,
+        save_strategy="epoch",
+        eval_strategy="no",
+        fp16=False,
         bf16=True,
         gradient_checkpointing=True,
-        report_to="none",
-    )
-
-    trainer = CustomMarginDPOTrainer(
-        model=model,
-        ref_model=None,  # TRL will automatically instantiate a frozen copy for pi_ref
-        train_dataset=train_dataset,
-        tokenizer=tokenizer,
-        args=training_args,
+        remove_unused_columns=False,
         beta=args.beta,
         max_length=1024,
         max_prompt_length=512,
+        model_init_kwargs=None,
     )
 
-    print("Starting alignment fine-tuning...")
+    is_frozen_arm = "frozen" in args.arch
+    trainer = RobustMarginDPOTrainer(
+        model=model,
+        ref_model=None,
+        train_dataset=train_dataset,
+        tokenizer=tokenizer,
+        args=training_args,
+        frozen_a=is_frozen_arm,
+    )
+
     print("\n--- Verifying Active Trainable Parameters ---")
     for name, param in model.named_parameters():
         if "lora_" in name:
             print(f"  {name:60} | requires_grad={param.requires_grad} | shape={list(param.shape)}")
-            if "frozen" in args.arch and "lora_A" in name:
+            if is_frozen_arm and "lora_A" in name:
                 assert not param.requires_grad, f"FATAL: {name} has requires_grad=True in a frozen-A arm!"
+
+    print("Starting alignment fine-tuning...")
     trainer.train()
 
     print(f"Saving aligned checkpoint to {args.output_dir}...")
