@@ -5,8 +5,7 @@ Phase 2 Step 3: Spectral Decomposition of Representation Covariance R_Omega.
 Captures activations at target_layer (v_proj input) for prompt-response pairs.
 Computes:
   - Delta h(x) = h(rejected) - h(chosen)
-  - Empirical representation covariance: R_Omega = E[Delta h Delta h^T]
-  - SVD / Eigendecomposition to extract:
+  - Truncated SVD on H_A (N x d) to extract:
       1. V_topk: Top-k eigenvectors of R_Omega (k x d_in)
       2. v_shared: Leading principal component across domains
       3. v_diff: Leading differential component between Domain A and Domain B
@@ -42,11 +41,9 @@ class RepresentationExtractor:
         self._register_hook()
 
     def _register_hook(self):
-        # Target the input to the v_proj module in target_layer
         layer_module = self.model.model.layers[self.target_layer].self_attn.v_proj
 
         def hook_fn(module, input, output):
-            # input[0] shape: (batch_size, seq_len, hidden_dim)
             self.captured_hidden = input[0].detach()
 
         self._hook_handle = layer_module.register_forward_hook(hook_fn)
@@ -57,10 +54,6 @@ class RepresentationExtractor:
 
 
 def extract_delta_h(model, tokenizer, extractor, prompt, chosen, rejected):
-    """
-    Computes mean token representation difference between rejected and chosen responses.
-    Delta h = h_rejected - h_chosen (averaged over response tokens)
-    """
     def get_rep(response):
         prompt_str = (
             f"<|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|>"
@@ -74,14 +67,21 @@ def extract_delta_h(model, tokenizer, extractor, prompt, chosen, rejected):
 
         with torch.no_grad():
             model(enc_full)
-            # Extractor captured input to v_proj: (1, seq_len, hidden_dim)
             resp_hidden = extractor.captured_hidden[:, prompt_len:, :]
+            if resp_hidden.shape[1] == 0:
+                # Fallback if response length is zero
+                resp_hidden = extractor.captured_hidden[:, -1:, :]
             mean_hidden = resp_hidden.mean(dim=1).squeeze(0)  # (hidden_dim,)
         return mean_hidden
 
     h_w = get_rep(chosen)
     h_l = get_rep(rejected)
-    return (h_l - h_w).cpu()  # Delta h(x)
+    dh = (h_l - h_w).cpu().float()
+    
+    # Replace non-finite entries if any exist
+    if not torch.isfinite(dh).all():
+        dh = torch.nan_to_num(dh, nan=0.0, posinf=1.0, neginf=-1.0)
+    return dh
 
 
 def load_jsonl(path, limit=None):
@@ -137,38 +137,36 @@ def main():
 
     extractor.remove()
 
-    print("Computing covariance matrix R_Omega and spectral decomposition...")
-    # Empirical covariance R_Omega = (H_A^T * H_A) / N
-    N_A, d = H_A.shape
-    R_Omega = torch.mm(H_A.t(), H_A) / N_A  # (d, d)
+    print("Running truncated SVD on representation matrix...")
+    # Clean non-finite entries before SVD
+    H_A = torch.nan_to_num(H_A, nan=0.0)
+    H_B = torch.nan_to_num(H_B, nan=0.0)
 
-    # Eigendecomposition of symmetric positive semi-definite matrix
-    eigenvalues, eigenvectors = torch.linalg.eigh(R_Omega)
-    # eigh returns ascending order; sort descending
-    idx = torch.argsort(eigenvalues, descending=True)
-    eigenvalues = eigenvalues[idx]
-    eigenvectors = eigenvectors[:, idx]
+    # Singular Value Decomposition of H_A: H_A = U * S * Vh
+    # Vh shape: (min(N, d), d)
+    U, S, Vh = torch.linalg.svd(H_A, full_matrices=False)
+    
+    N_A = H_A.shape[0]
+    eigenvalues = (S ** 2) / N_A
 
-    # Top-k spectral subspace: (k, d)
-    V_topk = eigenvectors[:, :args.rank_k].t().contiguous()
+    # Top-k eigenvectors of R_Omega: (k, d)
+    V_topk = Vh[:args.rank_k, :].contiguous()
 
-    # Shared leading direction: leading eigenvector of R_Omega
-    v_shared = eigenvectors[:, 0].contiguous()
-    v_shared = v_shared / torch.norm(v_shared)
+    # Shared leading direction: leading right singular vector
+    v_shared = Vh[0, :].contiguous()
+    v_shared = v_shared / (torch.norm(v_shared) + 1e-12)
 
-    # Difference direction: mean shift vector (mu_A - mu_B) projected orthogonal to v_shared
+    # Difference direction: mean shift vector (mu_A - mu_B) orthogonalized against v_shared
     mu_A = H_A.mean(dim=0)
     mu_B = H_B.mean(dim=0)
     v_diff_raw = mu_A - mu_B
-    # Orthogonalize against v_shared: v_diff = v_diff - (v_diff . v_shared) v_shared
     proj = torch.dot(v_diff_raw, v_shared) * v_shared
     v_diff = v_diff_raw - proj
     if torch.norm(v_diff) > 1e-6:
         v_diff = v_diff / torch.norm(v_diff)
     else:
-        # Fallback to second principal eigenvector if means are collinear
-        v_diff = eigenvectors[:, 1].contiguous()
-        v_diff = v_diff / torch.norm(v_diff)
+        v_diff = Vh[1, :].contiguous()
+        v_diff = v_diff / (torch.norm(v_diff) + 1e-12)
 
     subspace_payload = {
         "v_shared": v_shared.cpu(),
