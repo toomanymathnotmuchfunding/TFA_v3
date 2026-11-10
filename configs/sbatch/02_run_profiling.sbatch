@@ -31,7 +31,8 @@ python scripts/02a_extract_data.py \
     --dataset_name PKU-Alignment/BeaverTails \
     --dataset_split 330k_train \
     --output_dir data \
-    --max_pairs_per_domain 2500
+    --max_pairs_per_domain 2500 \
+    --seed 42
 
 echo "=== Phase 2 Step 2: Profile b0 and Select Omega ==="
 python scripts/02b_profile_b0.py \
