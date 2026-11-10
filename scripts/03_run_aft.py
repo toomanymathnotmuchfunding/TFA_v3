@@ -147,28 +147,48 @@ class RobustMarginDPOTrainer(DPOTrainer):
             self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
         return self.optimizer
 
-    def get_batch_loss_metrics(self, model, batch, train_eval="train"):
-        (
-            policy_chosen_logps,
-            policy_rejected_logps,
-            reference_chosen_logps,
-            reference_rejected_logps,
-        ) = self._get_batch_logps(model, batch)
-
-        pi_logratios = policy_chosen_logps - policy_rejected_logps
-        ref_logratios = reference_chosen_logps - reference_rejected_logps
+    def dpo_loss(
+        self,
+        chosen_logps: torch.FloatTensor,
+        rejected_logps: torch.FloatTensor,
+        ref_chosen_logps: torch.FloatTensor,
+        ref_rejected_logps: torch.FloatTensor,
+    ):
+        """
+        Computes custom margin DPO loss:
+          L = -log sigma( beta * (pi_logratios - ref_logratios) - M(x) )
+        """
+        pi_logratios = chosen_logps - rejected_logps
+        ref_logratios = ref_chosen_logps - ref_rejected_logps
         logits = pi_logratios - ref_logratios
 
-        # Device and shape-safe margin extraction
-        margins = torch.as_tensor(batch["margin"], device=logits.device, dtype=logits.dtype).view_as(logits)
-        losses = -F.logsigmoid(self.beta * logits - margins)
+        # Pull dynamic margin tensor stored during compute_loss / forward pass
+        margins = getattr(self, "_current_batch_margins", None)
+        if margins is None:
+            # Fallback to standard DPO loss if no custom margin is present
+            losses = -F.logsigmoid(self.beta * logits)
+        else:
+            margins = torch.as_tensor(margins, device=logits.device, dtype=logits.dtype).view_as(logits)
+            losses = -F.logsigmoid(self.beta * logits - margins)
 
-        metrics = {
-            f"{train_eval}_loss": losses.mean().item(),
-            f"{train_eval}_logits_mean": logits.mean().item(),
-            f"{train_eval}_margins_mean": margins.mean().item(),
-        }
-        return losses.mean(), metrics
+        chosen_rewards = self.beta * (chosen_logps - ref_chosen_logps).detach()
+        rejected_rewards = self.beta * (rejected_logps - ref_rejected_logps).detach()
+
+        return losses, chosen_rewards, rejected_rewards
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        # Cache batch margin tensor for dpo_loss calculation
+        if "margin" in inputs:
+            self._current_batch_margins = inputs["margin"]
+        else:
+            self._current_batch_margins = None
+
+        return super().compute_loss(
+            model,
+            inputs,
+            return_outputs=return_outputs,
+            num_items_in_batch=num_items_in_batch,
+        )
 
 
 def format_dataset(jsonl_path, target_type, beta, omega):
