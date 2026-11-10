@@ -19,10 +19,11 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Extract spectral decomposition subspaces")
+    parser = argparse.ArgumentParser(description="Extract spectral subspaces for R_Omega")
     parser.add_argument("--ref_model_path", type=str, required=True, help="Path to reference merged model")
     parser.add_argument("--data_dir", type=str, default="data", help="Directory containing dataset jsonl files")
     parser.add_argument("--results_dir", type=str, default="results", help="Directory containing profiling results")
+    parser.add_argument("--omega_size", type=int, default=100, help="Number of samples to select for Omega")
     parser.add_argument("--target_layer", type=int, default=16, help="Target transformer layer for representation extraction")
     parser.add_argument("--rank_k", type=int, default=4, help="Rank of spectral decomposition subspace")
     parser.add_argument("--output_file", type=str, default="data/spectral_subspaces.pt", help="Path to save decomposed subspaces")
