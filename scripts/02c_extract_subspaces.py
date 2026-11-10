@@ -136,6 +136,12 @@ def main():
 
     extractor.remove()
 
+    torch.save(
+        {"H_A": H_A, "H_B": H_B, "target_layer": args.target_layer},
+        os.path.join(args.data_dir, "hidden_states.pt"),
+    )
+    print(f"Cached Δh matrices to {args.data_dir}/hidden_states.pt")
+
     print("Running SVD on representation matrix...")
 
     # H_A is (N, d). SVD returns Vh with shape (min(N, d), d) = (100, 4096)
