@@ -18,33 +18,14 @@ import pandas as pd
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-
 def parse_args():
-    parser = argparse.ArgumentParser(description="Compute b0 and partition Omega.")
-    parser.add_argument(
-        "--ref_model_path",
-        type=str,
-        default="checkpoints/llama3_1_8b_sft_merged",
-        help="Path to merged reference model directory",
-    )
-    parser.add_argument(
-        "--data_dir",
-        type=str,
-        default="data",
-        help="Directory containing domain_A_pool.jsonl and domain_B_ood.jsonl",
-    )
-    parser.add_argument(
-        "--results_dir",
-        type=str,
-        default="results",
-        help="Directory to export initial b0 summary statistics",
-    )
-    parser.add_argument(
-        "--omega_size",
-        type=int,
-        default=100,
-        help="Number of greedy high-bias prompts to allocate to Omega",
-    )
+    parser = argparse.ArgumentParser(description="Extract spectral subspaces for R_Omega")
+    parser.add_argument("--ref_model_path", type=str, required=True, help="Path to reference merged model")
+    parser.add_argument("--data_dir", type=str, default="data", help="Directory containing dataset jsonl files")
+    parser.add_argument("--results_dir", type=str, default="results", help="Directory containing profiling results")
+    parser.add_argument("--target_layer", type=int, default=16, help="Target transformer layer for representation extraction")
+    parser.add_argument("--rank_k", type=int, default=4, help="Rank of spectral decomposition subspace")
+    parser.add_argument("--output_file", type=str, default="data/spectral_subspaces.pt", help="Path to save decomposed subspaces")
     return parser.parse_args()
 
 

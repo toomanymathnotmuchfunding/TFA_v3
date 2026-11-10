@@ -1,14 +1,9 @@
 """
 scripts/02a_extract_data.py
 
-Phase 2 Step 1: Extract and Match Domain Data from BeaverTails.
-Isolates prompt-response pairs into:
-- Domain A: Financial & Property Crime / Theft (Training Domain candidate pool)
-- Domain B: Drugs, Weapons & Banned Substances (Out-of-Domain evaluation pool)
-
-Matches pairs into (prompt, chosen, rejected) triplets where:
-- chosen (y_w): safe response (is_safe == True)
-- rejected (y_l): unsafe response (is_safe == False)
+Extract and Match Domain Data from BeaverTails into (prompt, chosen, rejected) triplets.
+- Domain A: financial_crime,property_crime,theft
+- Domain B: drug_abuse,weapons,banned_substance
 """
 
 import os
@@ -20,43 +15,53 @@ from datasets import load_dataset
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Extract and split BeaverTails domain pools.")
-    parser.add_argument(
-        "--dataset_name",
-        type=str,
-        default="PKU-Alignment/BeaverTails",
-        help="HuggingFace dataset repository",
-    )
-    parser.add_argument(
-        "--dataset_split",
-        type=str,
-        default="330k_train",
-        help="Dataset split to parse",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="data",
-        help="Directory to save extracted domain jsonl files",
-    )
+    parser.add_argument("--dataset_name", type=str, default="PKU-Alignment/BeaverTails")
+    parser.add_argument("--dataset_split", type=str, default="330k_train")
+    parser.add_argument("--output_dir", type=str, default="data")
     parser.add_argument(
         "--domain_a_category",
         type=str,
-        default="financial_crime_property_crime_theft",
-        help="Category key in BeaverTails for Domain A",
+        default="financial_crime,property_crime,theft",
     )
     parser.add_argument(
         "--domain_b_category",
         type=str,
-        default="drug_abuse_weapons_banned_substance",
-        help="Category key in BeaverTails for Domain B",
+        default="drug_abuse,weapons,banned_substance",
     )
-    parser.add_argument(
-        "--max_pairs_per_domain",
-        type=int,
-        default=2500,
-        help="Maximum matched (chosen, rejected) pairs to extract per domain",
-    )
+    parser.add_argument("--max_pairs_per_domain", type=int, default=2500)
+    parser.add_argument("--omega_size", type=int, default=100)
     return parser.parse_args()
+
+
+def extract_pairs(dataset, target_category, max_pairs):
+    # Group responses by prompt
+    prompt_groups = defaultdict(lambda: {"safe": [], "unsafe": []})
+    
+    for row in dataset:
+        cat_dict = row.get("category", {})
+        # Check if the row belongs to the target category
+        if cat_dict.get(target_category, False):
+            p = row["prompt"].strip()
+            resp = row["response"].strip()
+            if row["is_safe"]:
+                prompt_groups[p]["safe"].append(resp)
+            else:
+                prompt_groups[p]["unsafe"].append(resp)
+
+    # Form (prompt, chosen, rejected) pairs
+    pairs = []
+    for p, resps in prompt_groups.items():
+        if resps["safe"] and resps["unsafe"]:
+            # Pick first safe as chosen and first unsafe as rejected
+            pairs.append({
+                "prompt": p,
+                "chosen": resps["safe"][0],
+                "rejected": resps["unsafe"][0]
+            })
+            if len(pairs) >= max_pairs:
+                break
+                
+    return pairs
 
 
 def main():
@@ -64,75 +69,34 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     print(f"Loading {args.dataset_name} ({args.dataset_split})...")
-    dataset = load_dataset(args.dataset_name, split=args.dataset_split)
+    ds = load_dataset(args.dataset_name, split=args.dataset_split)
 
-    # Buckets to collect safe and unsafe responses per prompt
-    grouped_A = defaultdict(dict)
-    grouped_B = defaultdict(dict)
+    print(f"Extracting Domain A pairs ('{args.domain_a_category}')...")
+    domain_a_pairs = extract_pairs(ds, args.domain_a_category, args.max_pairs_per_domain)
+    print(f"Extracted {len(domain_a_pairs)} pairs for Domain A.")
 
-    print("Filtering and grouping prompts by domain category...")
-    for row in dataset:
-        prompt = row["prompt"].strip()
-        response = row["response"].strip()
-        is_safe = row["is_safe"]
-        categories = row["category"]
+    print(f"Extracting Domain B pairs ('{args.domain_b_category}')...")
+    domain_b_pairs = extract_pairs(ds, args.domain_b_category, args.max_pairs_per_domain)
+    print(f"Extracted {len(domain_b_pairs)} pairs for Domain B.")
 
-        # Domain A selection
-        if categories.get(args.domain_a_category, False):
-            if is_safe and "chosen" not in grouped_A[prompt]:
-                grouped_A[prompt]["chosen"] = response
-            elif not is_safe and "rejected" not in grouped_A[prompt]:
-                grouped_A[prompt]["rejected"] = response
+    # Split Domain A into pool and held-out evaluation set
+    # Reserving the first omega_size for training candidate selection
+    omega_train = domain_a_pairs[:args.omega_size]
+    domain_a_pool = domain_a_pairs[args.omega_size:]
+    domain_a_heldout = domain_a_pool[:len(domain_a_pool) // 2]
 
-        # Domain B selection (mutually exclusive with Domain A)
-        elif categories.get(args.domain_b_category, False):
-            if is_safe and "chosen" not in grouped_B[prompt]:
-                grouped_B[prompt]["chosen"] = response
-            elif not is_safe and "rejected" not in grouped_B[prompt]:
-                grouped_B[prompt]["rejected"] = response
+    # Save to data directory
+    def write_jsonl(filename, data):
+        path = os.path.join(args.output_dir, filename)
+        with open(path, "w", encoding="utf-8") as f:
+            for item in data:
+                f.write(json.dumps(item) + "\n")
+        print(f"Saved {len(data)} items to {path}")
 
-    # Format into complete (prompt, chosen, rejected) pairs
-    data_A = [
-        {
-            "prompt": p,
-            "chosen": v["chosen"],
-            "rejected": v["rejected"],
-            "domain": "A",
-            "category": args.domain_a_category,
-        }
-        for p, v in grouped_A.items()
-        if "chosen" in v and "rejected" in v
-    ]
-
-    data_B = [
-        {
-            "prompt": p,
-            "chosen": v["chosen"],
-            "rejected": v["rejected"],
-            "domain": "B",
-            "category": args.domain_b_category,
-        }
-        for p, v in grouped_B.items()
-        if "chosen" in v and "rejected" in v
-    ]
-
-    data_A = data_A[: args.max_pairs_per_domain]
-    data_B = data_B[: args.max_pairs_per_domain]
-
-    path_A = os.path.join(args.output_dir, "domain_A_pool.jsonl")
-    path_B = os.path.join(args.output_dir, "domain_B_ood.jsonl")
-
-    print(f"Writing {len(data_A)} matched pairs to {path_A}...")
-    with open(path_A, "w", encoding="utf-8") as f:
-        for item in data_A:
-            f.write(json.dumps(item) + "\n")
-
-    print(f"Writing {len(data_B)} matched pairs to {path_B}...")
-    with open(path_B, "w", encoding="utf-8") as f:
-        for item in data_B:
-            f.write(json.dumps(item) + "\n")
-
-    print("Data extraction complete.")
+    write_jsonl("omega_train.jsonl", omega_train)
+    write_jsonl("domain_A_pool.jsonl", domain_a_pool)
+    write_jsonl("domain_A_heldout.jsonl", domain_a_heldout)
+    write_jsonl("domain_B_ood.jsonl", domain_b_pairs)
 
 
 if __name__ == "__main__":
