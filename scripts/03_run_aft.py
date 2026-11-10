@@ -306,7 +306,9 @@ def main():
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Trainable Parameters: {trainable_params:,} / {total_params:,} ({100 * trainable_params / total_params:.4f}%)")
-
+    
+    optim_name = "adamw_bnb_8bit" if args.arch == "fft" else "adamw_torch"
+    
     training_args = DPOConfig(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
@@ -322,8 +324,10 @@ def main():
         gradient_checkpointing_kwargs={"use_reentrant": False},
         remove_unused_columns=False,
         beta=args.beta,
-        max_length=768,
-        max_prompt_length=384,
+        max_length=512,
+        max_prompt_length=256,
+        optim=optim_name,
+        precompute_ref_log_probs=True,
         model_init_kwargs=None,
     )
 
