@@ -7,8 +7,8 @@ Computes:
   - Delta h(x) = h(rejected) - h(chosen)
   - Truncated SVD on H_A (N x d) to extract:
       1. V_topk: Top-k eigenvectors of R_Omega (k x d_in)
-      2. v_shared: Leading principal component across domains
-      3. v_diff: Leading differential component between Domain A and Domain B
+      2. v_shared: Leading principal component across domains (d_in,)
+      3. v_diff: Leading differential component between Domain A and Domain B (d_in,)
 Saves results dictionary to --output_file (data/spectral_subspaces.pt).
 """
 
@@ -44,6 +44,7 @@ class RepresentationExtractor:
         layer_module = self.model.model.layers[self.target_layer].self_attn.v_proj
 
         def hook_fn(module, input, output):
+            # input[0] shape: (batch_size, seq_len, hidden_dim)
             self.captured_hidden = input[0].detach()
 
         self._hook_handle = layer_module.register_forward_hook(hook_fn)
@@ -53,6 +54,7 @@ class RepresentationExtractor:
             self._hook_handle.remove()
 
 
+@torch.inference_mode()
 def extract_delta_h(model, tokenizer, extractor, prompt, chosen, rejected):
     def get_rep(response):
         prompt_str = (
@@ -65,20 +67,17 @@ def extract_delta_h(model, tokenizer, extractor, prompt, chosen, rejected):
         enc_full = tokenizer(full_str, return_tensors="pt").input_ids.to(model.device)
         prompt_len = enc_prompt.shape[1]
 
-        with torch.no_grad():
-            model(enc_full)
-            resp_hidden = extractor.captured_hidden[:, prompt_len:, :]
-            if resp_hidden.shape[1] == 0:
-                # Fallback if response length is zero
-                resp_hidden = extractor.captured_hidden[:, -1:, :]
-            mean_hidden = resp_hidden.mean(dim=1).squeeze(0)  # (hidden_dim,)
-        return mean_hidden
+        model(enc_full)
+        resp_hidden = extractor.captured_hidden[:, prompt_len:, :]
+        if resp_hidden.shape[1] == 0:
+            resp_hidden = extractor.captured_hidden[:, -1:, :]
+        mean_hidden = resp_hidden.mean(dim=1).squeeze(0)  # (hidden_dim,)
+        return mean_hidden.cpu().float()
 
     h_w = get_rep(chosen)
     h_l = get_rep(rejected)
-    dh = (h_l - h_w).cpu().float()
-    
-    # Replace non-finite entries if any exist
+    dh = h_l - h_w
+
     if not torch.isfinite(dh).all():
         dh = torch.nan_to_num(dh, nan=0.0, posinf=1.0, neginf=-1.0)
     return dh
@@ -137,26 +136,24 @@ def main():
 
     extractor.remove()
 
-    print("Running truncated SVD on representation matrix...")
-    # Clean non-finite entries before SVD
+    print("Running SVD on representation matrix...")
     H_A = torch.nan_to_num(H_A, nan=0.0)
     H_B = torch.nan_to_num(H_B, nan=0.0)
 
-    # Singular Value Decomposition of H_A: H_A = U * S * Vh
-    # Vh shape: (min(N, d), d)
+    # H_A is (N, d). SVD returns Vh with shape (min(N, d), d) = (100, 4096)
     U, S, Vh = torch.linalg.svd(H_A, full_matrices=False)
     
     N_A = H_A.shape[0]
     eigenvalues = (S ** 2) / N_A
 
-    # Top-k eigenvectors of R_Omega: (k, d)
+    # Top-k eigenvectors of R_Omega: shape (k, d)
     V_topk = Vh[:args.rank_k, :].contiguous()
 
-    # Shared leading direction: leading right singular vector
+    # Leading shared direction: 1D vector of shape (d,)
     v_shared = Vh[0, :].contiguous()
     v_shared = v_shared / (torch.norm(v_shared) + 1e-12)
 
-    # Difference direction: mean shift vector (mu_A - mu_B) orthogonalized against v_shared
+    # Leading difference direction: mean shift projected orthogonal to v_shared
     mu_A = H_A.mean(dim=0)
     mu_B = H_B.mean(dim=0)
     v_diff_raw = mu_A - mu_B
@@ -168,13 +165,14 @@ def main():
         v_diff = Vh[1, :].contiguous()
         v_diff = v_diff / (torch.norm(v_diff) + 1e-12)
 
+    # Guarantee all outputs are clean 1D/2D float CPU tensors
     subspace_payload = {
-        "v_shared": v_shared.cpu(),
-        "v_diff": v_diff.cpu(),
-        "V_topk": V_topk.cpu(),
-        "eigenvalues": eigenvalues[:args.rank_k].cpu(),
-        "target_layer": args.target_layer,
-        "rank_k": args.rank_k,
+        "v_shared": v_shared.cpu().float(),
+        "v_diff": v_diff.cpu().float(),
+        "V_topk": V_topk.cpu().float(),
+        "eigenvalues": eigenvalues[:args.rank_k].cpu().float(),
+        "target_layer": int(args.target_layer),
+        "rank_k": int(args.rank_k),
     }
 
     torch.save(subspace_payload, args.output_file)
