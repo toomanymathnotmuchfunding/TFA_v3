@@ -63,6 +63,7 @@ def parse_args():
     return parser.parse_args()
 
 
+@torch.inference_mode()
 def compute_sequence_logp(model, tokenizer, prompt, response):
     prompt_str = (
         f"<|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|>"
@@ -77,12 +78,12 @@ def compute_sequence_logp(model, tokenizer, prompt, response):
     labels = enc_full.clone()
     labels[:, :prompt_len] = -100
 
-    with torch.no_grad():
-        outputs = model(enc_full, labels=labels)
-        resp_token_count = (labels != -100).sum().item()
-        total_logp = -outputs.loss.item() * resp_token_count
-
-    return total_logp / max(1, resp_token_count)
+    outputs = model(enc_full, labels=labels)
+    resp_token_count = (labels != -100).sum().item()
+    
+    # Total unnormalized sequence log-probability
+    total_logp = -outputs.loss.item() * resp_token_count
+    return total_logp
 
 
 def evaluate_split(model, tokenizer, split_data, desc="Evaluating"):
@@ -93,35 +94,41 @@ def evaluate_split(model, tokenizer, split_data, desc="Evaluating"):
         prompt = item["prompt"]
         chosen = item["chosen"]
         rejected = item["rejected"]
-        b0 = float(item["b0"])
 
         logp_w = compute_sequence_logp(model, tokenizer, prompt, chosen)
         logp_l = compute_sequence_logp(model, tokenizer, prompt, rejected)
         b1 = logp_l - logp_w
 
-        b0_vals.append(b0)
         b1_vals.append(b1)
+        
+        # Safely extract b0 if pre-annotated
+        if "b0" in item and item["b0"] is not None:
+            b0_vals.append(float(item["b0"]))
+        else:
+            b0_vals.append(np.nan)
 
-    b0_arr = np.array(b0_vals)
-    b1_arr = np.array(b1_vals)
+    b1_arr = np.array(b1_vals, dtype=np.float64)
+    b0_arr = np.array(b0_vals, dtype=np.float64)
 
     # Quadratic principal loss
     loss = float(np.mean(b1_arr ** 2))
     mean_b1 = float(np.mean(b1_arr))
     std_b1 = float(np.std(b1_arr))
 
-    # Linear regression slope: b1 ~ alpha + slope * b0
-    if len(b0_arr) > 1 and np.var(b0_arr) > 1e-8:
-        slope, intercept, r_val, p_val, std_err = linregress(b0_arr, b1_arr)
+    # Linear regression slope: b1 ~ alpha + slope * b0 (only on valid pairs)
+    valid_mask = ~np.isnan(b0_arr)
+    if valid_mask.sum() > 2 and np.var(b0_arr[valid_mask]) > 1e-8:
+        slope, intercept, r_val, p_val, std_err = linregress(b0_arr[valid_mask], b1_arr[valid_mask])
+        r2 = float(r_val ** 2)
     else:
-        slope, r_val = 0.0, 0.0
+        slope, r2 = 0.0, 0.0
 
     return {
         "loss": loss,
         "mean_b1": mean_b1,
         "std_b1": std_b1,
         "slope": float(slope),
-        "r2": float(r_val ** 2),
+        "r2": r2,
     }
 
 
