@@ -2,12 +2,7 @@
 scripts/02b_profile_b0.py
 
 Computes baseline bias under the frozen merged reference model:
-    b0(x) = log pi_ref(y_l | x) - log pi_ref(y_w | x)
-
-Performs greedy state selection on Domain A:
-  - Slices the top omega_size prompts with highest b0 into data/omega_train.jsonl
-  - Saves the remaining Domain A prompts to data/domain_A_heldout.jsonl
-  - Annotates Domain B with b0 and saves to data/domain_B_ood.jsonl
+    b0(x) = log pi_ref(y_l | x) - log pi_ref(y_w | x)   (unnormalized total log-prob)
 """
 
 import os
@@ -48,6 +43,7 @@ def parse_args():
     return parser.parse_args()
 
 
+@torch.inference_mode()
 def compute_sequence_logp(model, tokenizer, prompt: str, response: str) -> float:
     prompt_str = (
         f"<|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|>"
@@ -62,12 +58,11 @@ def compute_sequence_logp(model, tokenizer, prompt: str, response: str) -> float
     labels = enc_full.clone()
     labels[:, :prompt_len] = -100
 
-    with torch.no_grad():
-        outputs = model(enc_full, labels=labels)
-        resp_token_count = (labels != -100).sum().item()
-        total_logp = -outputs.loss.item() * resp_token_count
-
-    return total_logp / max(1, resp_token_count)
+    outputs = model(enc_full, labels=labels)
+    resp_token_count = (labels != -100).sum().item()
+    # Unnormalized total sequence log-probability
+    total_logp = -outputs.loss.item() * resp_token_count
+    return float(total_logp)
 
 
 def score_domain(model, tokenizer, input_path: str, desc: str):
@@ -107,6 +102,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.ref_model_path,
         torch_dtype=torch.bfloat16,
+        attn_implementation="sdpa",
         device_map="cuda",
     )
     model.eval()
@@ -117,7 +113,7 @@ def main():
     print("Scoring baseline bias b0 on Domain B...")
     scored_B = score_domain(model, tokenizer, path_B, desc="Domain B Profiling")
 
-    # Greedy sort on Domain A descending by initial misalignment b0
+    # Greedy sort descending: allocate the top-omega_size highest b0 pairs to Omega
     scored_A_sorted = sorted(scored_A, key=lambda x: x["b0"], reverse=True)
     omega_train = scored_A_sorted[: args.omega_size]
     domain_A_heldout = scored_A_sorted[args.omega_size :]
@@ -138,7 +134,6 @@ def main():
         for r in scored_B:
             f.write(json.dumps(r) + "\n")
 
-    # Export distribution diagnostics
     summary = [
         {
             "Split": "Omega (Train, Top b0)",

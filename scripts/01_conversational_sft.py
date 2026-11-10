@@ -14,10 +14,11 @@ from datasets import load_dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    TrainingArguments,
 )
 from trl import SFTTrainer
 from peft import LoraConfig
+import inspect
+from trl import SFTConfig   # subclass of TrainingArguments in TRL ≥ 0.12
 
 
 def parse_args():
@@ -102,9 +103,6 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "right"
 
     print(f"Loading dataset: {args.dataset_name} ({args.dataset_split})...")
     raw_dataset = load_dataset(args.dataset_name, split=args.dataset_split)
@@ -150,7 +148,9 @@ def main():
         task_type="CAUSAL_LM",
     )
 
-    training_args = TrainingArguments(
+    # -------- Version-adaptive SFT config --------
+    config_fields = inspect.signature(SFTConfig.__init__).parameters
+    config_kwargs = dict(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum_steps,
@@ -162,19 +162,40 @@ def main():
         save_strategy="epoch",
         bf16=True,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         report_to="none",
     )
+    # `max_length` (new) vs `max_seq_length` (old)
+    if "max_length" in config_fields:
+        config_kwargs["max_length"] = args.max_seq_length
+    elif "max_seq_length" in config_fields:
+        config_kwargs["max_seq_length"] = args.max_seq_length
+    if "dataset_text_field" in config_fields:
+        config_kwargs["dataset_text_field"] = "text"
 
-    print("Initializing SFTTrainer...")
-    trainer = SFTTrainer(
+    training_args = SFTConfig(**config_kwargs)
+
+    # -------- Version-adaptive SFTTrainer kwargs --------
+    trainer_fields = inspect.signature(SFTTrainer.__init__).parameters
+    trainer_kwargs = dict(
         model=model,
         train_dataset=formatted_dataset,
         peft_config=peft_config,
-        dataset_text_field="text",
-        max_seq_length=args.max_seq_length,
-        tokenizer=tokenizer,
         args=training_args,
     )
+    # `processing_class` (new) vs `tokenizer` (old)
+    if "processing_class" in trainer_fields:
+        trainer_kwargs["processing_class"] = tokenizer
+    else:
+        trainer_kwargs["tokenizer"] = tokenizer
+    # Old TRL still wants these on the trainer, not the config
+    if "max_seq_length" in trainer_fields and "max_length" not in config_kwargs:
+        trainer_kwargs["max_seq_length"] = args.max_seq_length
+    if "dataset_text_field" in trainer_fields and "dataset_text_field" not in config_kwargs:
+        trainer_kwargs["dataset_text_field"] = "text"
+
+    print("Initializing SFTTrainer...")
+    trainer = SFTTrainer(**trainer_kwargs)
 
     print("Beginning conversational SFT...")
     trainer.train()

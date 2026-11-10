@@ -117,10 +117,23 @@ def evaluate_split(model, tokenizer, split_data, desc="Evaluating"):
 
     # Linear regression slope: b1 ~ alpha + slope * b0 (only on valid pairs)
     valid_mask = ~np.isnan(b0_arr)
-    if valid_mask.sum() > 2 and np.var(b0_arr[valid_mask]) > 1e-8:
-        slope, intercept, r_val, p_val, std_err = linregress(b0_arr[valid_mask], b1_arr[valid_mask])
+    n_valid = int(valid_mask.sum())
+
+    # Refuse to report a regression on a predominantly-missing b0 column.
+    if n_valid < max(10, len(split_data) // 2):
+        raise RuntimeError(
+            f"{desc}: only {n_valid}/{len(split_data)} samples have b0. "
+            "Run 02b_profile_b0.py before 04_evaluate_and_regress.py, or "
+            "regenerate the split files."
+        )
+
+    if np.var(b0_arr[valid_mask]) > 1e-8:
+        slope, _intercept, r_val, _p_val, _std_err = linregress(
+            b0_arr[valid_mask], b1_arr[valid_mask]
+        )
         r2 = float(r_val ** 2)
     else:
+        # b0 is present but constant — slope is genuinely undefined.
         slope, r2 = 0.0, 0.0
 
     return {
@@ -129,6 +142,8 @@ def evaluate_split(model, tokenizer, split_data, desc="Evaluating"):
         "std_b1": std_b1,
         "slope": float(slope),
         "r2": r2,
+        "n_b0_valid": n_valid,
+        "n_total": len(split_data),
     }
 
 
@@ -202,6 +217,8 @@ def main():
             row[f"std_b1_{split_name}"] = metrics["std_b1"]
             row[f"slope_{split_name}"] = metrics["slope"]
             row[f"r2_{split_name}"] = metrics["r2"]
+            row[f"n_b0_valid_{split_name}"] = metrics["n_b0_valid"]
+            row[f"n_total_{split_name}"] = metrics["n_total"]
 
         records.append(row)
 

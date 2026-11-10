@@ -137,8 +137,6 @@ def main():
     extractor.remove()
 
     print("Running SVD on representation matrix...")
-    H_A = torch.nan_to_num(H_A, nan=0.0)
-    H_B = torch.nan_to_num(H_B, nan=0.0)
 
     # H_A is (N, d). SVD returns Vh with shape (min(N, d), d) = (100, 4096)
     U, S, Vh = torch.linalg.svd(H_A, full_matrices=False)
@@ -159,11 +157,18 @@ def main():
     v_diff_raw = mu_A - mu_B
     proj = torch.dot(v_diff_raw, v_shared) * v_shared
     v_diff = v_diff_raw - proj
-    if torch.norm(v_diff) > 1e-6:
-        v_diff = v_diff / torch.norm(v_diff)
-    else:
-        v_diff = Vh[1, :].contiguous()
-        v_diff = v_diff / (torch.norm(v_diff) + 1e-12)
+    v_diff_norm = torch.norm(v_diff).item()
+
+    if v_diff_norm <= 1e-6:
+        raise RuntimeError(
+            "Differential direction is degenerate: ||mu_A - mu_B|| orthogonal to "
+            f"v_shared is {v_diff_norm:.2e}. Domain A and Domain B share the same "
+            "leading direction in this layer, so a 'differential' subspace is not "
+            "identifiable. Either (a) change --target_layer, (b) increase --rank_k "
+            "and inspect V_topk, or (c) report that the _diff arms are undefined "
+            "for this configuration."
+        )
+    v_diff = v_diff / v_diff_norm
 
     # Guarantee all outputs are clean 1D/2D float CPU tensors
     subspace_payload = {
