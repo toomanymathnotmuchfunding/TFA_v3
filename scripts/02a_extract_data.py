@@ -1,9 +1,13 @@
 """
 scripts/02a_extract_data.py
 
-Extract and Match Domain Data from BeaverTails into (prompt, chosen, rejected) triplets.
-- Domain A: financial_crime,property_crime,theft
-- Domain B: drug_abuse,weapons,banned_substance
+Phase 2 Step 1: Extract and Match Domain Data from BeaverTails.
+- Domain A: Financial & Property Crime / Theft
+- Domain B: Drugs, Weapons & Banned Substances
+
+Constructs (prompt, chosen, rejected) triplets:
+- chosen (y_w): safe response (is_safe == True)
+- rejected (y_l): unsafe response under target category (is_safe == False)
 """
 
 import os
@@ -33,34 +37,34 @@ def parse_args():
     return parser.parse_args()
 
 
-def extract_pairs(dataset, target_category, max_pairs):
-    # Group responses by prompt
-    prompt_groups = defaultdict(lambda: {"safe": [], "unsafe": []})
-    
+def extract_matched_pairs(dataset, target_category, max_pairs):
+    print(f"Pass 1: Identifying unsafe completions for '{target_category}'...")
+    unsafe_by_prompt = defaultdict(list)
     for row in dataset:
-        cat_dict = row.get("category", {})
-        # Check if the row belongs to the target category
-        if cat_dict.get(target_category, False):
+        if not row["is_safe"] and row.get("category", {}).get(target_category, False):
             p = row["prompt"].strip()
-            resp = row["response"].strip()
-            if row["is_safe"]:
-                prompt_groups[p]["safe"].append(resp)
-            else:
-                prompt_groups[p]["unsafe"].append(resp)
+            unsafe_by_prompt[p].append(row["response"].strip())
 
-    # Form (prompt, chosen, rejected) pairs
+    target_prompts = set(unsafe_by_prompt.keys())
+    print(f"Found {len(target_prompts)} unique candidate prompts. Pass 2: Finding safe completions...")
+
+    safe_by_prompt = defaultdict(list)
+    for row in dataset:
+        p = row["prompt"].strip()
+        if p in target_prompts and row["is_safe"]:
+            safe_by_prompt[p].append(row["response"].strip())
+
     pairs = []
-    for p, resps in prompt_groups.items():
-        if resps["safe"] and resps["unsafe"]:
-            # Pick first safe as chosen and first unsafe as rejected
+    for p in target_prompts:
+        if safe_by_prompt[p] and unsafe_by_prompt[p]:
             pairs.append({
                 "prompt": p,
-                "chosen": resps["safe"][0],
-                "rejected": resps["unsafe"][0]
+                "chosen": safe_by_prompt[p][0],
+                "rejected": unsafe_by_prompt[p][0]
             })
             if len(pairs) >= max_pairs:
                 break
-                
+
     return pairs
 
 
@@ -71,21 +75,19 @@ def main():
     print(f"Loading {args.dataset_name} ({args.dataset_split})...")
     ds = load_dataset(args.dataset_name, split=args.dataset_split)
 
-    print(f"Extracting Domain A pairs ('{args.domain_a_category}')...")
-    domain_a_pairs = extract_pairs(ds, args.domain_a_category, args.max_pairs_per_domain)
-    print(f"Extracted {len(domain_a_pairs)} pairs for Domain A.")
+    print(f"\n--- Extracting Domain A ('{args.domain_a_category}') ---")
+    domain_a_pairs = extract_matched_pairs(ds, args.domain_a_category, args.max_pairs_per_domain)
+    print(f"Extracted {len(domain_a_pairs)} paired triplets for Domain A.")
 
-    print(f"Extracting Domain B pairs ('{args.domain_b_category}')...")
-    domain_b_pairs = extract_pairs(ds, args.domain_b_category, args.max_pairs_per_domain)
-    print(f"Extracted {len(domain_b_pairs)} pairs for Domain B.")
+    print(f"\n--- Extracting Domain B ('{args.domain_b_category}') ---")
+    domain_b_pairs = extract_matched_pairs(ds, args.domain_b_category, args.max_pairs_per_domain)
+    print(f"Extracted {len(domain_b_pairs)} paired triplets for Domain B.")
 
-    # Split Domain A into pool and held-out evaluation set
-    # Reserving the first omega_size for training candidate selection
+    # Partition Domain A: Omega candidate train set, pool, and held-out set
     omega_train = domain_a_pairs[:args.omega_size]
     domain_a_pool = domain_a_pairs[args.omega_size:]
     domain_a_heldout = domain_a_pool[:len(domain_a_pool) // 2]
 
-    # Save to data directory
     def write_jsonl(filename, data):
         path = os.path.join(args.output_dir, filename)
         with open(path, "w", encoding="utf-8") as f:
