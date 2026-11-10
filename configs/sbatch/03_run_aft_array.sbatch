@@ -66,8 +66,8 @@ python scripts/03_run_aft.py \
     --beta 0.1 \
     --target_layer 16 \
     --epochs 3 \
-    --batch_size 2 \
-    --grad_accum_steps 4 \
+    --batch_size 1 \
+    --grad_accum_steps 8 \
     --output_dir "$OUT_DIR"
 
 echo "Arm $RUN_NAME completed successfully."

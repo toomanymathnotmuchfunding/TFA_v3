@@ -295,6 +295,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.ref_model_path,
         torch_dtype=torch.bfloat16,
+        attn_implementation="sdpa",
         device_map="cuda",
     )
     model.config.use_cache = False
@@ -318,10 +319,11 @@ def main():
         fp16=False,
         bf16=True,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         remove_unused_columns=False,
         beta=args.beta,
-        max_length=1024,
-        max_prompt_length=512,
+        max_length=768,
+        max_prompt_length=384,
         model_init_kwargs=None,
     )
 
