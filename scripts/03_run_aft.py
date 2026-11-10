@@ -12,8 +12,7 @@ import torch.nn.functional as F
 import inspect
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from trl import DPOConfig, DPOTrainer
-from trl.trainer.dpo_trainer import DPODataCollatorWithPadding
+from trl import DPOConfig, DPOTrainer, DataCollatorForPreference
 from peft import LoraConfig, get_peft_model
 
 
@@ -45,10 +44,13 @@ def parse_args():
     return parser.parse_args()
 
 
-class MarginDPODataCollator(DPODataCollatorWithPadding):
+class MarginDPODataCollator(DataCollatorForPreference):
     """
     Subclasses TRL collator to ensure the custom 'margin' scalar survives collation.
     """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
     def __call__(self, features):
         batch = super().__call__(features)
         if "margin" in features[0]:

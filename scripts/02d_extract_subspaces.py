@@ -136,11 +136,13 @@ def main():
 
     extractor.remove()
 
+    # Cache raw Δh matrices so 02e_domain_similarity.py can load them instantly
+    cache_path = os.path.join(args.data_dir, f"hidden_states_L{args.target_layer}.pt")
     torch.save(
         {"H_A": H_A, "H_B": H_B, "target_layer": args.target_layer},
-        os.path.join(args.data_dir, "hidden_states.pt"),
+        cache_path,
     )
-    print(f"Cached Δh matrices to {args.data_dir}/hidden_states.pt")
+    print(f"Cached Δh matrices to {cache_path}")
 
     print("Running SVD on representation matrix...")
 

@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1
-#SBATCH --time=02:30:00
+#SBATCH --time=03:30:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
@@ -41,13 +41,50 @@ python scripts/02b_profile_b0.py \
     --results_dir results \
     --omega_size 100
 
-echo "=== Phase 2 Step 3: Spectral Decomposition of R_Omega ==="
-python scripts/02c_extract_subspaces.py \
+echo "=== Phase 2 Step 3: Sweep All Layers for Similarity ==="
+python scripts/02c_sweep_layers.py \
     --ref_model_path checkpoints/llama3_1_8b_sft_merged \
     --data_dir data \
-    --results_dir results \
-    --target_layer 16 \
-    --rank_k 4 \
-    --output_file data/spectral_subspaces.pt
+    --num_samples 50 \
+    --output_file results/layer_similarity.txt
 
-echo "Phase 2 Complete."
+# --- Parse the best layers from the sweep ---
+# The file is sorted: 1st data row (line 2) is most orthogonal, last row is most similar.
+ORTHO_LAYER=$(sed -n '2p' results/layer_similarity.txt | cut -d',' -f1)
+SIM_LAYER=$(tail -n 1 results/layer_similarity.txt | cut -d',' -f1)
+
+echo ""
+echo "=========================================================="
+echo "Sweep Results:"
+echo "  Most Orthogonal Layer: L${ORTHO_LAYER}"
+echo "  Most Similar Layer:    L${SIM_LAYER}"
+echo "=========================================================="
+echo ""
+
+# Array of layers to test: Baseline (16) + Similar + Orthogonal
+LAYERS_TO_TEST=("16" "$SIM_LAYER" "$ORTHO_LAYER")
+# Deduplicate and sort numerically
+UNIQUE_LAYERS=($(echo "${LAYERS_TO_TEST[@]}" | tr ' ' '\n' | sort -nu | tr '\n' ' '))
+
+for LAYER in "${UNIQUE_LAYERS[@]}"; do
+    echo "=== Phase 2 Step 4: Extract Subspaces for Layer $LAYER ==="
+    python scripts/02d_extract_subspaces.py \
+        --ref_model_path checkpoints/llama3_1_8b_sft_merged \
+        --data_dir data \
+        --results_dir results \
+        --target_layer "$LAYER" \
+        --rank_k 4 \
+        --output_file "data/spectral_subspaces_L${LAYER}.pt"
+
+    echo "=== Phase 2 Step 5: Analyze Similarity for Layer $LAYER ==="
+    python scripts/02e_domain_similarity.py \
+        --ref_model_path checkpoints/llama3_1_8b_sft_merged \
+        --data_dir data \
+        --target_layer "$LAYER" \
+        --rank_k 4 \
+        --omega_size 100 \
+        --cache_file "data/hidden_states_L${LAYER}.pt" | tee "results/similarity_analysis_L${LAYER}.txt"
+    echo ""
+done
+
+echo "Phase 2 Complete. Generated subspaces for layers: ${UNIQUE_LAYERS[*]}"

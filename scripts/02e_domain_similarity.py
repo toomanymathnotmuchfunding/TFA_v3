@@ -1,16 +1,12 @@
 """
-scripts/02d_domain_similarity.py
+scripts/02e_domain_similarity.py
 
-Optional cross-domain analysis of the Δh subspaces. Loads cached H_A/H_B
-(data/hidden_states.pt, produced by 02c if patched, or by this script on
-first run). Reports three views of "how similar are Domain A and Domain B":
-
-  1. Cross-cosine matrix C[i,j] = cos(V_A[i], V_B[j]) between the two
-     domains' top-k principal directions (k×k).
-  2. Variance explained: fraction of one domain's total Δh variance captured
-     by the other domain's top-k directions.
-  3. Mean projections: mu_A·v and mu_B·v for v in {V_topk, v_shared, v_diff}.
-     Positive on both → shared shift. Opposite signs → direction discriminates.
+Offline analysis of the Δh subspaces. Loads cached H_A/H_B 
+(data/hidden_states_L{layer}.pt, produced by 02d). Reports:
+  1. Cross-cosine matrix between A's and B's top-k principal axes.
+  2. Variance explained: energy overlap between domains.
+  3. Mean projections: mu_A·v and mu_B·v for V_topk and v_diff.
+  4. Detailed view of v_diff alignment and variance.
 """
 
 import os
@@ -28,7 +24,7 @@ def parse_args():
     p.add_argument("--target_layer", type=int, default=16)
     p.add_argument("--rank_k", type=int, default=4)
     p.add_argument("--omega_size", type=int, default=100)
-    p.add_argument("--cache_file", default="data/hidden_states.pt")
+    p.add_argument("--cache_file", default=None, help="Defaults to data/hidden_states_L{layer}.pt")
     return p.parse_args()
 
 
@@ -69,11 +65,15 @@ def load_jsonl(path, limit=None):
 
 def main():
     args = parse_args()
+    
+    # If no cache file is provided, infer it from the target layer
+    if args.cache_file is None:
+        args.cache_file = os.path.join(args.data_dir, f"hidden_states_L{args.target_layer}.pt")
 
     if os.path.exists(args.cache_file):
         c = torch.load(args.cache_file, weights_only=True)
         H_A, H_B = c["H_A"], c["H_B"]
-        print(f"Loaded cached H_A={tuple(H_A.shape)}, H_B={tuple(H_B.shape)}")
+        print(f"Loaded cached H_A={tuple(H_A.shape)}, H_B={tuple(H_B.shape)} from {args.cache_file}")
     else:
         print(f"No cache at {args.cache_file}; extracting Δh (one-time ~15 min)...")
         omega = load_jsonl(os.path.join(args.data_dir, "omega_train.jsonl"), limit=args.omega_size)
@@ -140,10 +140,30 @@ def main():
     v_shared = Vh_A[0] / Vh_A[0].norm()
     v_diff_raw = mu_A - mu_B
     v_diff = v_diff_raw - (v_diff_raw @ v_shared) * v_shared
-    v_diff = v_diff / v_diff.norm()
+    v_diff = v_diff / (v_diff.norm() + 1e-12)
+    
     row("v_diff", v_diff)
     print("  A-frac = mu·v / ‖mu‖ → fraction of each domain's mean magnitude on this axis")
     print("  Same sign on both → shared shift. Opposite sign → discriminates domains.")
+
+    # ---------- 4. Detailed view of v_diff ----------
+    print(f"\n=== 4. v_diff Alignment Details ===")
+    cos_A = (Vh_A[:k] @ v_diff).cpu()
+    cos_B = (Vh_B[:k] @ v_diff).cpu()
+    
+    print("  Cosine similarity of v_diff with Domain A's principal axes:")
+    for i in range(k):
+        print(f"    v_diff · A[{i}]: {cos_A[i].item():+7.4f}")
+        
+    print("  Cosine similarity of v_diff with Domain B's principal axes:")
+    for j in range(k):
+        print(f"    v_diff · B[{j}]: {cos_B[j].item():+7.4f}")
+
+    var_A = (H_A @ v_diff).pow(2).sum().item() / tot_A
+    var_B = (H_B @ v_diff).pow(2).sum().item() / tot_B
+    print("\n  Variance explained by v_diff:")
+    print(f"    v_diff captures {var_A:6.2%} of Domain A's total variance")
+    print(f"    v_diff captures {var_B:6.2%} of Domain B's total variance")
 
 
 if __name__ == "__main__":
