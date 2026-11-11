@@ -104,7 +104,8 @@ class RobustMarginDPOTrainer(DPOTrainer):
         return losses, chosen_rewards, rejected_rewards
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        self._current_batch_margins = inputs.get("margin", None)
+        # POP the margin so it doesn't get passed to model.forward()
+        self._current_batch_margins = inputs.pop("margin", None)
         return super().compute_loss(
             model,
             inputs,
@@ -128,8 +129,8 @@ def format_dataset(jsonl_path, target_type, beta, omega):
             f"<|start_header_id|>user<|end_header_id|>\n\n{item['prompt']}<|eot_id|>"
             f"<|start_header_id|>assistant<|end_header_id|>\n\n"
         )
-        chosen_str = item["chosen"] + "<|eot_id|>"
-        rejected_str = item["rejected"] + "<|eot_id|>"
+        chosen_str = item["chosen"]
+        rejected_str = item["rejected"]
 
         b0_val = float(item["b0"])
         margin = beta * multiplier * max(0.0, b0_val)
@@ -141,10 +142,21 @@ def format_dataset(jsonl_path, target_type, beta, omega):
             "margin": margin,
         })
 
+    assert len(formatted) > 0, "FATAL: Dataset is empty!"
+    
     return Dataset.from_list(formatted)
 
 
 def inject_and_configure_lora(model, arch, directions_path, target_layer):
+    matched_modules = 0
+    for name, module in model.named_modules():
+        if hasattr(module, "lora_A") and str(target_layer) in name:
+            # ... (copy weights)
+            matched_modules += 1
+            
+    assert matched_modules > 0, f"FATAL: No LoRA modules matched layer {target_layer}!"
+    print(f"Successfully injected subspace into {matched_modules} module(s).")
+
     if arch == "fft":
         for p in model.parameters():
             p.requires_grad = True
@@ -205,6 +217,9 @@ def main():
     print(f"Learning Rate: {lr} | Output Directory: {args.output_dir}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.ref_model_path)
+    # Force Llama-3 turn token to be the EOS token so TRL appends the right one
+    tokenizer.eos_token = "<|eot_id|>" 
+    tokenizer.eos_token_id = 128009
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
@@ -265,6 +280,8 @@ def main():
         max_prompt_length=256,
         optim=optim_name,
         precompute_ref_log_probs=True,
+        loss_type="sigmoid",
+        label_smoothing=0.0,
     )
 
     data_collator = MarginDPODataCollator(pad_token_id=tokenizer.pad_token_id)
