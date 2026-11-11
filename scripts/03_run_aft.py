@@ -123,10 +123,7 @@ def format_dataset(jsonl_path, target_type, beta, omega):
 
     for item in raw_items:
         assert "b0" in item, "FATAL: 'b0' missing from training sample. Run 02b_profile_b0.py first."
-        prompt_str = (
-            f"<|start_header_id|>user<|end_header_id|>\n\n{item['prompt']}<|eot_id|>"
-            f"<|start_header_id|>assistant<|end_header_id|>\n\n"
-        )
+        prompt_str = [{"role": "user", "content": item["prompt"]}]
         chosen_str = item["chosen"] + "<|eot_id|>"
         rejected_str = item["rejected"] + "<|eot_id|>"
 
