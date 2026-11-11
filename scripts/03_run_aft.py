@@ -270,19 +270,18 @@ def main():
     # Configure structural parameter subspace
     model = inject_and_configure_lora(model, args.arch, args.directions_path, args.target_layer)
 
-    # For FFT, precompute ref logps with a temporary ref model, then free it.
-    ref_model = None
-    if args.arch == "fft":
-        print("Instantiating temporary reference model for precomputation...")
-        ref_model = AutoModelForCausalLM.from_pretrained(
-            args.ref_model_path,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="sdpa",
-            device_map="cuda",
-        )
-        ref_model.eval()
-        for p in ref_model.parameters():
-            p.requires_grad = False
+    # ALWAYS load a separate reference model to prevent TRL's adapter-toggling
+    # bug that crashes gradient checkpointing during backward passes.
+    print("Instantiating frozen reference model...")
+    ref_model = AutoModelForCausalLM.from_pretrained(
+        args.ref_model_path,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="sdpa",
+        device_map="cuda",
+    )
+    ref_model.eval()
+    for p in ref_model.parameters():
+        p.requires_grad = False
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
@@ -353,9 +352,9 @@ def main():
     if args.arch != "fft":
         assert active_b, "FATAL: No active trainable lora_B adapter found!"
 
-    print("Starting alignment fine-tuning...")
     # Critical for frozen LoRA + gradient checkpointing
     model.enable_input_require_grads()
+    print("Starting alignment fine-tuning...")
     trainer.train()
 
     print(f"Saving aligned checkpoint to {args.output_dir}...")
