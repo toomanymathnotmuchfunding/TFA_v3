@@ -59,10 +59,8 @@ def compute_sequence_logp(model, tokenizer, prompt: str, response: str) -> float
     labels[:, :prompt_len] = -100
 
     outputs = model(enc_full, labels=labels)
-    resp_token_count = (labels != -100).sum().item()
-    # Unnormalized total sequence log-probability
-    total_logp = -outputs.loss.item() * resp_token_count
-    return float(total_logp)
+    # Return MEAN per-token log-prob (not sum)
+    return float(-outputs.loss.item())
 
 
 def score_domain(model, tokenizer, input_path: str, desc: str):

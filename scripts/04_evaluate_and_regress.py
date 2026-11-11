@@ -1,18 +1,5 @@
 """
 scripts/04_evaluate_and_regress.py
-
-Phase 4: Evaluation and Statistical Regression Analysis across Experimental Arms.
-Evaluates the 12 fine-tuned model checkpoints across three evaluation splits:
-  1. Omega (In-distribution training prompts, N=100)
-  2. Domain A Held-out (In-distribution test prompts, N~900)
-  3. Domain B OOD (Out-of-distribution test prompts, N~1000)
-
-Calculates:
-  - Post-training bias: b1(x) = log pi_theta(y_l | x) - log pi_theta(y_w | x)
-  - Principal empirical quadratic loss: L = (1 / |S|) * sum_{x in S} (b1(x))^2
-  - OLS regression slope: b1(x) = alpha + beta_slope * b0(x) (measuring shrinkage/rotation)
-
-Exports results to a structured CSV file in results/.
 """
 
 import os
@@ -22,6 +9,8 @@ import argparse
 import torch
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 from tqdm import tqdm
 from scipy.stats import linregress
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -30,36 +19,11 @@ from peft import PeftModel
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate checkpoints and run regression analysis.")
-    parser.add_argument(
-        "--ref_model_path",
-        type=str,
-        default="checkpoints/llama3_1_8b_sft_merged",
-        help="Path to merged reference model checkpoint",
-    )
-    parser.add_argument(
-        "--checkpoints_dir",
-        type=str,
-        default="checkpoints/aft_runs",
-        help="Root directory containing the trained AFT checkpoint folders",
-    )
-    parser.add_argument(
-        "--data_dir",
-        type=str,
-        default="data",
-        help="Directory containing the split JSONL files",
-    )
-    parser.add_argument(
-        "--results_dir",
-        type=str,
-        default="results",
-        help="Directory to save the final regression table",
-    )
-    parser.add_argument(
-        "--output_filename",
-        type=str,
-        default="final_loss_regression_table.csv",
-        help="Filename for the exported CSV summary table",
-    )
+    parser.add_argument("--ref_model_path", type=str, default="checkpoints/llama3_1_8b_sft_merged")
+    parser.add_argument("--checkpoints_dir", type=str, default="checkpoints/aft_runs")
+    parser.add_argument("--data_dir", type=str, default="data")
+    parser.add_argument("--results_dir", type=str, default="results")
+    parser.add_argument("--output_filename", type=str, default="final_loss_regression_table.csv")
     return parser.parse_args()
 
 
@@ -79,72 +43,51 @@ def compute_sequence_logp(model, tokenizer, prompt, response):
     labels[:, :prompt_len] = -100
 
     outputs = model(enc_full, labels=labels)
-    resp_token_count = (labels != -100).sum().item()
-    
-    # Total unnormalized sequence log-probability
-    total_logp = -outputs.loss.item() * resp_token_count
-    return total_logp
+    # MEAN per-token log-prob (must match 02b_profile_b0.py)
+    return -outputs.loss.item()
 
 
 def evaluate_split(model, tokenizer, split_data, desc="Evaluating"):
-    b0_vals = []
-    b1_vals = []
+    b0_vals, b1_vals = [], []
 
     for item in tqdm(split_data, desc=desc, leave=False):
-        prompt = item["prompt"]
-        chosen = item["chosen"]
-        rejected = item["rejected"]
-
+        prompt, chosen, rejected = item["prompt"], item["chosen"], item["rejected"]
         logp_w = compute_sequence_logp(model, tokenizer, prompt, chosen)
         logp_l = compute_sequence_logp(model, tokenizer, prompt, rejected)
-        b1 = logp_l - logp_w
-
-        b1_vals.append(b1)
-        
-        # Safely extract b0 if pre-annotated
-        if "b0" in item and item["b0"] is not None:
-            b0_vals.append(float(item["b0"]))
-        else:
-            b0_vals.append(np.nan)
+        b1_vals.append(logp_l - logp_w)
+        b0_vals.append(float(item["b0"]) if "b0" in item and item["b0"] is not None else np.nan)
 
     b1_arr = np.array(b1_vals, dtype=np.float64)
     b0_arr = np.array(b0_vals, dtype=np.float64)
 
-    # Quadratic principal loss
     loss = float(np.mean(b1_arr ** 2))
-    mean_b1 = float(np.mean(b1_arr))
-    std_b1 = float(np.std(b1_arr))
+    mean_b1, std_b1 = float(np.mean(b1_arr)), float(np.std(b1_arr))
 
-    # Linear regression slope: b1 ~ alpha + slope * b0 (only on valid pairs)
     valid_mask = ~np.isnan(b0_arr)
     n_valid = int(valid_mask.sum())
+    mean_b0 = float(np.nanmean(b0_arr))
+    std_b0 = float(np.nanstd(b0_arr))
 
-    # Refuse to report a regression on a predominantly-missing b0 column.
     if n_valid < max(10, len(split_data) // 2):
-        raise RuntimeError(
-            f"{desc}: only {n_valid}/{len(split_data)} samples have b0. "
-            "Run 02b_profile_b0.py before 04_evaluate_and_regress.py, or "
-            "regenerate the split files."
-        )
+        raise RuntimeError(f"{desc}: only {n_valid}/{len(split_data)} samples have b0.")
 
     if np.var(b0_arr[valid_mask]) > 1e-8:
-        slope, _intercept, r_val, _p_val, _std_err = linregress(
-            b0_arr[valid_mask], b1_arr[valid_mask]
-        )
+        slope, _, r_val, _, _ = linregress(b0_arr[valid_mask], b1_arr[valid_mask])
         r2 = float(r_val ** 2)
     else:
-        # b0 is present but constant — slope is genuinely undefined.
         slope, r2 = 0.0, 0.0
 
     return {
         "loss": loss,
         "mean_b1": mean_b1,
         "std_b1": std_b1,
+        "mean_b0": mean_b0,
+        "std_b0": std_b0,
         "slope": float(slope),
         "r2": r2,
         "n_b0_valid": n_valid,
         "n_total": len(split_data),
-    }
+    }, b0_arr, b1_arr
 
 
 def load_model_checkpoint(checkpoint_path, ref_model_path):
@@ -153,6 +96,7 @@ def load_model_checkpoint(checkpoint_path, ref_model_path):
         base = AutoModelForCausalLM.from_pretrained(
             ref_model_path,
             torch_dtype=torch.bfloat16,
+            attn_implementation="sdpa",
             device_map="cuda",
         )
         model = PeftModel.from_pretrained(base, checkpoint_path)
@@ -160,68 +104,167 @@ def load_model_checkpoint(checkpoint_path, ref_model_path):
         model = AutoModelForCausalLM.from_pretrained(
             checkpoint_path,
             torch_dtype=torch.bfloat16,
+            attn_implementation="sdpa",
             device_map="cuda",
         )
     model.eval()
     return model
 
 
+def generate_plots(df, output_dir, scatter_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    sns.set_theme(style="whitegrid", context="talk")
+
+    # ---- Plot 1: b_0 distribution across splits (log-scale x) ----
+    # This shows WHY Omega is the "hard" training set.
+    plt.figure(figsize=(10, 5))
+    ax = plt.gca()
+    for label, col, color in [
+        ("Omega (Train, Top b0)", "mean_b0_Omega", "#d62728"),
+        ("Domain A Heldout", "mean_b0_Domain_A_Heldout", "#1f77b4"),
+        ("Domain B OOD", "mean_b0_Domain_B_OOD", "#2ca02c"),
+    ]:
+        if col in df.columns:
+            vals = df[col].dropna().values
+            ax.axvline(vals.mean(), color=color, linewidth=2, label=label, linestyle="--")
+    plt.axvline(0.0, color="black", linewidth=1, linestyle=":")
+    plt.xlabel("Mean per-token b0 (reference bias)")
+    plt.title("Baseline b0 by split — Omega is deliberately the misaligned tail")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "b0_distribution.png"), dpi=300)
+    plt.close()
+
+    # ---- Plot 2: Loss across splits (log scale y) ----
+    plt.figure(figsize=(14, 6))
+    df_melted = df.melt(
+        id_vars=["run_name"],
+        value_vars=["L_Omega", "L_Domain_A_Heldout", "L_Domain_B_OOD"],
+        var_name="Split",
+        value_name="Loss",
+    )
+    df_melted["Split"] = df_melted["Split"].map({
+        "L_Omega": "Omega (Train)",
+        "L_Domain_A_Heldout": "Domain A (Heldout)",
+        "L_Domain_B_OOD": "Domain B (OOD)",
+    })
+    sns.barplot(data=df_melted, x="run_name", y="Loss", hue="Split", palette="viridis")
+    plt.yscale("log")
+    plt.xticks(rotation=45, ha="right")
+    plt.title("Quadratic Loss across arms and splits (log scale)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "loss_comparison.png"), dpi=300)
+    plt.close()
+
+    # ---- Plot 3: OOD shrinkage slopes ----
+    plt.figure(figsize=(14, 5))
+    sns.barplot(data=df, x="run_name", y="slope_Domain_B_OOD", color="steelblue")
+    plt.axhline(1.0, color="red", linestyle="--", linewidth=1.5, label="No shrinkage (slope=1)")
+    plt.axhline(0.0, color="green", linestyle=":", linewidth=1.5, label="Full shrinkage (slope=0)")
+    plt.xticks(rotation=45, ha="right")
+    plt.title("OOD shrinkage: slope of b1 ~ b0 on Domain B")
+    plt.ylabel("Slope (closer to 0 = more shrinkage)")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "ood_slope.png"), dpi=300)
+    plt.close()
+
+    # ---- Plot 4: Per-arm b0 vs b1 scatter on OOD ----
+    # This is the "money plot" — visually shows whether the arm shrinks, rotates, or ignores OOD.
+    available = sorted(glob.glob(os.path.join(scatter_dir, "*_Domain_B_OOD.npz")))
+    if available:
+        n_arms = len(available)
+        n_cols = min(4, n_arms)
+        n_rows = (n_arms + n_cols - 1) // n_cols
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows), squeeze=False)
+
+        # Global bounds for consistent axes
+        all_b0, all_b1 = [], []
+        for path in available:
+            d = np.load(path)
+            mask = ~np.isnan(d["b0"])
+            all_b0.append(d["b0"][mask])
+            all_b1.append(d["b1"][mask])
+        all_b0 = np.concatenate(all_b0)
+        all_b1 = np.concatenate(all_b1)
+        lo = float(min(all_b0.min(), all_b1.min())) - 0.5
+        hi = float(max(all_b0.max(), all_b1.max())) + 0.5
+
+        for i, path in enumerate(available):
+            ax = axes[i // n_cols, i % n_cols]
+            name = os.path.basename(path).replace("_Domain_B_OOD.npz", "")
+            d = np.load(path)
+            mask = ~np.isnan(d["b0"])
+            ax.scatter(d["b0"][mask], d["b1"][mask], alpha=0.35, s=10, color="steelblue")
+            # Identity line (no change) and flat line (full shrinkage)
+            ax.plot([lo, hi], [lo, hi], "r--", linewidth=1, label="No change")
+            ax.axhline(0.0, color="green", linestyle=":", linewidth=1, label="Full shrinkage")
+            ax.set_xlim(lo, hi)
+            ax.set_ylim(lo, hi)
+            ax.set_title(name, fontsize=11)
+            ax.set_xlabel("b0 (reference)")
+            ax.set_ylabel("b1 (trained)")
+            ax.grid(alpha=0.3)
+            if i == 0:
+                ax.legend(fontsize=8)
+
+        # Hide unused subplots
+        for j in range(n_arms, n_rows * n_cols):
+            axes[j // n_cols, j % n_cols].axis("off")
+
+        fig.suptitle("OOD: b1 vs b0 per arm — where does the trained model land?", fontsize=14)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "ood_b0_vs_b1.png"), dpi=300)
+        plt.close()
+
+
 def main():
     args = parse_args()
     os.makedirs(args.results_dir, exist_ok=True)
+    scatter_dir = os.path.join(args.results_dir, "scatter_data")
+    os.makedirs(scatter_dir, exist_ok=True)
 
     splits = {
         "Omega": os.path.join(args.data_dir, "omega_train.jsonl"),
         "Domain_A_Heldout": os.path.join(args.data_dir, "domain_A_heldout.jsonl"),
         "Domain_B_OOD": os.path.join(args.data_dir, "domain_B_ood.jsonl"),
     }
-
     loaded_splits = {}
     for name, path in splits.items():
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Missing required data split at: {path}")
         with open(path, "r", encoding="utf-8") as f:
             loaded_splits[name] = [json.loads(line) for line in f]
 
-    print(f"Loading tokenizer from: {args.ref_model_path}")
     tokenizer = AutoTokenizer.from_pretrained(args.ref_model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     checkpoint_folders = sorted(
-        [
-            d for d in glob.glob(os.path.join(args.checkpoints_dir, "*"))
-            if os.path.isdir(d) and not os.path.basename(d).startswith(".")
-        ]
+        d for d in glob.glob(os.path.join(args.checkpoints_dir, "*")) if os.path.isdir(d)
     )
-
-    if not checkpoint_folders:
-        raise FileNotFoundError(f"No checkpoint subdirectories found in: {args.checkpoints_dir}")
-
-    print(f"Discovered {len(checkpoint_folders)} checkpoint directories for evaluation.")
     records = []
 
     for ckp_dir in checkpoint_folders:
         run_name = os.path.basename(ckp_dir)
-        print(f"\n==========================================")
-        print(f"Evaluating Arm: {run_name}")
-        print(f"==========================================")
+        print(f"\n=== Evaluating Arm: {run_name} ===")
 
         model = load_model_checkpoint(ckp_dir, args.ref_model_path)
         row = {"run_name": run_name}
 
         for split_name, split_data in loaded_splits.items():
-            metrics = evaluate_split(model, tokenizer, split_data, desc=f"{run_name} [{split_name}]")
-            row[f"L_{split_name}"] = metrics["loss"]
-            row[f"mean_b1_{split_name}"] = metrics["mean_b1"]
-            row[f"std_b1_{split_name}"] = metrics["std_b1"]
-            row[f"slope_{split_name}"] = metrics["slope"]
-            row[f"r2_{split_name}"] = metrics["r2"]
-            row[f"n_b0_valid_{split_name}"] = metrics["n_b0_valid"]
-            row[f"n_total_{split_name}"] = metrics["n_total"]
+            metrics, b0_arr, b1_arr = evaluate_split(
+                model, tokenizer, split_data, desc=f"{run_name} [{split_name}]"
+            )
+            for k, v in metrics.items():
+                row[f"{k}_{split_name}"] = v
+
+            # Save per-sample (b0, b1) for later scatter plots
+            np.savez(
+                os.path.join(scatter_dir, f"{run_name}_{split_name}.npz"),
+                b0=b0_arr,
+                b1=b1_arr,
+            )
 
         records.append(row)
-
         del model
         torch.cuda.empty_cache()
 
@@ -229,13 +272,11 @@ def main():
     out_csv = os.path.join(args.results_dir, args.output_filename)
     df_results.to_csv(out_csv, index=False)
 
-    print("\n\n" + "=" * 90)
-    print("FINAL EXPERIMENTAL LOSS & GENERALIZATION REGRESSION TABLE")
-    print("=" * 90)
-    display_cols = ["run_name", "L_Omega", "L_Domain_A_Heldout", "L_Domain_B_OOD", "slope_Domain_B_OOD"]
-    print(df_results[display_cols].to_string(index=False))
-    print("=" * 90)
-    print(f"Saved complete table to {out_csv}")
+    print(f"\nSaved complete table to {out_csv}")
+    print("Generating plots...")
+    generate_plots(df_results, os.path.join(args.results_dir, "plots"), scatter_dir)
+    print(f"Plots saved to {args.results_dir}/plots/")
+    print(f"Per-sample scatter data saved to {scatter_dir}/")
 
 
 if __name__ == "__main__":
