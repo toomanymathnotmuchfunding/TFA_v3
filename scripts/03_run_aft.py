@@ -266,7 +266,7 @@ def main():
         precompute_ref_log_probs=True,
     )
 
-    data_collator = MarginDPODataCollator(tokenizer=tokenizer)
+    data_collator = MarginDPODataCollator(pad_token_id=tokenizer.pad_token_id)
     is_frozen_arm = "frozen" in args.arch
 
     # Inspect the *parent* class signature — RobustMarginDPOTrainer.__init__
