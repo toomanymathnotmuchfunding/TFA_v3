@@ -45,13 +45,44 @@ def parse_args():
     return parser.parse_args()
 
 
-class MarginDPODataCollator(DPODataCollatorWithPadding):
-    def __call__(self, features):
-        batch = super().__call__(features)
-        if "margin" in features[0]:
-            batch["margin"] = torch.tensor([f["margin"] for f in features], dtype=torch.float32)
-        return batch
+class MarginDPODataCollator:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
 
+    def __call__(self, features):
+        # Extract margins
+        margins = [float(f.pop("margin", 0.0)) for f in features]
+        
+        # Helper to pad sequences
+        def pad_ids(ids_list):
+            batch = self.tokenizer.pad(
+                {"input_ids": ids_list},
+                padding=True,
+                return_tensors="pt"
+            )
+            return batch["input_ids"], batch["attention_mask"]
+            
+        prompt_ids, prompt_mask = pad_ids([f["prompt_input_ids"] for f in features])
+        chosen_ids, chosen_mask = pad_ids([f["chosen_input_ids"] for f in features])
+        rejected_ids, rejected_mask = pad_ids([f["rejected_input_ids"] for f in features])
+        
+        # Create labels by cloning input_ids and masking the pad tokens
+        chosen_labels = chosen_ids.clone()
+        chosen_labels[chosen_labels == self.tokenizer.pad_token_id] = -100
+        rejected_labels = rejected_ids.clone()
+        rejected_labels[rejected_labels == self.tokenizer.pad_token_id] = -100
+        
+        return {
+            "prompt_input_ids": prompt_ids,
+            "prompt_attention_mask": prompt_mask,
+            "chosen_input_ids": chosen_ids,
+            "chosen_attention_mask": chosen_mask,
+            "chosen_labels": chosen_labels,
+            "rejected_input_ids": rejected_ids,
+            "rejected_attention_mask": rejected_mask,
+            "rejected_labels": rejected_labels,
+            "margin": torch.tensor(margins, dtype=torch.float32),
+        }
 
 class RobustMarginDPOTrainer(DPOTrainer):
     def __init__(self, *args, frozen_a=False, **kwargs):
@@ -268,7 +299,7 @@ def main():
         precompute_ref_log_probs=True,
     )
 
-    data_collator = MarginDPODataCollator(pad_token_id=tokenizer.pad_token_id)
+    data_collator = MarginDPODataCollator(tokenizer=tokenizer)
     is_frozen_arm = "frozen" in args.arch
 
     # Inspect the *parent* class signature — RobustMarginDPOTrainer.__init__
