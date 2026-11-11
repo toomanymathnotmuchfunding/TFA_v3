@@ -143,20 +143,11 @@ def format_dataset(jsonl_path, target_type, beta, omega):
         })
 
     assert len(formatted) > 0, "FATAL: Dataset is empty!"
-    
+
     return Dataset.from_list(formatted)
 
 
 def inject_and_configure_lora(model, arch, directions_path, target_layer):
-    matched_modules = 0
-    for name, module in model.named_modules():
-        if hasattr(module, "lora_A") and str(target_layer) in name:
-            # ... (copy weights)
-            matched_modules += 1
-            
-    assert matched_modules > 0, f"FATAL: No LoRA modules matched layer {target_layer}!"
-    print(f"Successfully injected subspace into {matched_modules} module(s).")
-
     if arch == "fft":
         for p in model.parameters():
             p.requires_grad = True
@@ -174,16 +165,45 @@ def inject_and_configure_lora(model, arch, directions_path, target_layer):
         return get_peft_model(model, peft_config)
 
     # 1D Subspaces (frozen_shared, frozen_diff, train_shared, train_diff)
+    # Remove layers_to_transform to avoid PEFT regex matching bugs.
+    # We will apply LoRA to all layers, then manually freeze the ones we don't want.
     peft_config = LoraConfig(
         r=1,
         lora_alpha=1,
         target_modules=["v_proj"],
-        layers_to_transform=[target_layer],
         lora_dropout=0.0,
         bias="none",
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, peft_config)
+
+    subspace_data = torch.load(directions_path, map_location="cpu", weights_only=True)
+    v_vec = subspace_data["v_shared"] if "shared" in arch else subspace_data["v_diff"]
+    v_vec = v_vec.float()
+
+    matched_modules = 0
+    for name, module in model.named_modules():
+        if hasattr(module, "lora_A") and "v_proj" in name:
+            is_target = str(target_layer) in name
+            
+            if is_target:
+                target_param = module.lora_A["default"].weight
+                with torch.no_grad():
+                    target_param.data.copy_(v_vec.to(target_param.dtype).unsqueeze(0))
+
+                if "frozen" in arch:
+                    target_param.requires_grad = False
+                    print(f"FROZEN enforcement: requires_grad=False on {name}.lora_A")
+                else:
+                    target_param.requires_grad = True
+                    print(f"TRAINABLE: requires_grad=True on {name}.lora_A")
+                matched_modules += 1
+            else:
+                # Freeze all non-target layers so only Layer 16 trains
+                module.lora_A["default"].weight.requires_grad = False
+                module.lora_B["default"].weight.requires_grad = False
+
+    assert matched_modules == 1, f"FATAL: Expected exactly 1 module matched for layer {target_layer}, got {matched_modules}!"
 
     subspace_data = torch.load(directions_path, map_location="cpu", weights_only=True)
     v_vec = subspace_data["v_shared"] if "shared" in arch else subspace_data["v_diff"]
