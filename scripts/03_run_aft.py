@@ -90,6 +90,20 @@ class RobustMarginDPOTrainer(DPOTrainer):
             self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
         return self.optimizer
 
+    def get_train_dataloader(self):
+        # This triggers TRL to compute and cache the reference log-probs
+        dataloader = super().get_train_dataloader()
+
+        # Once cached, we can safely delete the 16GB reference model to save VRAM
+        if getattr(self.args, "precompute_ref_log_probs", False) and hasattr(self, "ref_model") and self.ref_model is not None:
+            print("\nPrecomputation complete. Freeing reference model to save VRAM...")
+            del self.ref_model
+            self.ref_model = None
+            import torch
+            torch.cuda.empty_cache()
+            
+        return dataloader
+
     def dpo_loss(
         self,
         chosen_logps: torch.FloatTensor,
@@ -159,7 +173,16 @@ def format_dataset(jsonl_path, target_type, beta, omega):
 
 def inject_and_configure_lora(model, arch, directions_path, target_layer):
     if arch == "fft":
+        print("Using Partial FFT: Unfreezing last 4 layers + lm_head...")
+        # Freeze everything first
         for p in model.parameters():
+            p.requires_grad = False
+        # Unfreeze the last 4 transformer blocks
+        for layer in model.model.layers[-4:]:
+            for p in layer.parameters():
+                p.requires_grad = True
+        # Unfreeze the language model head
+        for p in model.lm_head.parameters():
             p.requires_grad = True
         return model
 
@@ -214,23 +237,6 @@ def inject_and_configure_lora(model, arch, directions_path, target_layer):
                 module.lora_B["default"].weight.requires_grad = False
 
     assert matched_modules == 1, f"FATAL: Expected exactly 1 module matched for layer {target_layer}, got {matched_modules}!"
-
-    subspace_data = torch.load(directions_path, map_location="cpu", weights_only=True)
-    v_vec = subspace_data["v_shared"] if "shared" in arch else subspace_data["v_diff"]
-    v_vec = v_vec.float()
-
-    for name, module in model.named_modules():
-        if hasattr(module, "lora_A") and str(target_layer) in name:
-            target_param = module.lora_A["default"].weight
-            with torch.no_grad():
-                target_param.data.copy_(v_vec.to(target_param.dtype).unsqueeze(0))
-
-            if "frozen" in arch:
-                target_param.requires_grad = False
-                print(f"FROZEN enforcement: requires_grad=False on {name}.lora_A")
-            else:
-                target_param.requires_grad = True
-                print(f"TRAINABLE: requires_grad=True on {name}.lora_A")
 
     return model
 
