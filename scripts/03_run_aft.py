@@ -263,7 +263,11 @@ def main():
         precompute_ref_log_probs=True,
     )
 
-    data_collator = MarginDPODataCollator(pad_token_id=tokenizer.pad_token_id)
+    data_collator = MarginDPODataCollator(
+        pad_token_id=tokenizer.pad_token_id,
+        max_length=512,
+        max_prompt_length=256
+    )
     is_frozen_arm = "frozen" in args.arch
 
     # Inspect the *parent* class signature — RobustMarginDPOTrainer.__init__
@@ -288,30 +292,6 @@ def main():
         frozen_a=is_frozen_arm,
         **{_tok_kw: tokenizer},
     )
-
-    # --- FFT memory fix: precompute ref logps, then free the ref model ---
-    if args.arch == "fft" and ref_model is not None:
-        print("Precomputing reference log-probabilities...")
-        if not hasattr(trainer, "_precompute_ref_log_probs"):
-            raise RuntimeError(
-                "Installed TRL lacks DPOTrainer._precompute_ref_log_probs; "
-                "check the pinned TRL version or fall back to letting train() handle it."
-            )
-        new_train_dataset = trainer._precompute_ref_log_probs(trainer.train_dataset)
-        if new_train_dataset is not None:
-            trainer.train_dataset = new_train_dataset
-
-        del trainer.ref_model
-        trainer.ref_model = None
-        del ref_model
-        torch.cuda.empty_cache()
-        print("Reference model released; training with cached ref logps.")
-
-    # After the manual precompute block:
-    if args.arch == "fft" and ref_model is None and hasattr(trainer, "train_dataset"):
-        # Manual precompute already populated the ref logps; prevent train()
-        # from recomputing against the (now deleted) reference.
-        trainer.args.precompute_ref_log_probs = False
 
     print("\n--- Verifying Active Trainable Parameters ---")
     active_b = False
