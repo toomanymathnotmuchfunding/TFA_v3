@@ -46,9 +46,19 @@ def parse_args():
 
 class MarginDPODataCollator(DPODataCollatorWithPadding):
     def __call__(self, features):
-        # Safely extract margins before TRL's collator processes the features
+        # Safely extract margins
         margins = [float(f.pop("margin", 0.0)) for f in features]
         batch = super().__call__(features)
+        
+        # BULLETPROOF FIX: If TRL drops the masks, re-create them from the input IDs
+        pad_id = self.pad_token_id
+        if "prompt_attention_mask" not in batch and "prompt_input_ids" in batch:
+            batch["prompt_attention_mask"] = (batch["prompt_input_ids"] != pad_id).long()
+        if "chosen_attention_mask" not in batch and "chosen_input_ids" in batch:
+            batch["chosen_attention_mask"] = (batch["chosen_input_ids"] != pad_id).long()
+        if "rejected_attention_mask" not in batch and "rejected_input_ids" in batch:
+            batch["rejected_attention_mask"] = (batch["rejected_input_ids"] != pad_id).long()
+            
         batch["margin"] = torch.tensor(margins, dtype=torch.float32)
         return batch
 
@@ -299,7 +309,7 @@ def main():
         max_length=512,
         max_prompt_length=256,
         optim=optim_name,
-        precompute_ref_log_probs=True,
+        precompute_ref_log_probs=False,
         loss_type="sigmoid",
         label_smoothing=0.0,
     )
