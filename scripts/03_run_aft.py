@@ -114,7 +114,7 @@ class RobustMarginDPOTrainer(DPOTrainer):
         )
 
 
-def format_dataset(jsonl_path, target_type, beta, omega, tokenizer):
+def format_dataset(jsonl_path, target_type, beta, omega):
     with open(jsonl_path, "r", encoding="utf-8") as f:
         raw_items = [json.loads(line) for line in f]
 
@@ -124,31 +124,21 @@ def format_dataset(jsonl_path, target_type, beta, omega, tokenizer):
     for item in raw_items:
         assert "b0" in item, "FATAL: 'b0' missing from training sample. Run 02b_profile_b0.py first."
         
-        # 1. Format prompt as chat and tokenize
-        prompt_messages = [{"role": "user", "content": item["prompt"]}]
-        prompt_str = tokenizer.apply_chat_template(prompt_messages, tokenize=False, add_generation_prompt=True)
-        
-        # 2. Tokenize prompt, chosen, and rejected
-        prompt_enc = tokenizer(prompt_str, add_special_tokens=False, return_tensors="pt", padding=False)
-        chosen_enc = tokenizer(item["chosen"], add_special_tokens=False, return_tensors="pt", padding=False)
-        rejected_enc = tokenizer(item["rejected"], add_special_tokens=False, return_tensors="pt", padding=False)
+        # Provide raw text strings. TRL will handle the tokenization and masks.
+        prompt_str = (
+            f"<|start_header_id|>user<|end_header_id|>\n\n{item['prompt']}<|eot_id|>"
+            f"<|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
+        chosen_str = item["chosen"] + "<|eot_id|>"
+        rejected_str = item["rejected"] + "<|eot_id|>"
 
-        # 3. Build the exact keys TRL expects
         b0_val = float(item["b0"])
         margin = beta * multiplier * max(0.0, b0_val)
 
         formatted.append({
-            "prompt_input_ids": prompt_enc["input_ids"].squeeze(0).tolist(),
-            "prompt_attention_mask": prompt_enc["attention_mask"].squeeze(0).tolist(),
-            
-            "chosen_input_ids": chosen_enc["input_ids"].squeeze(0).tolist(),
-            "chosen_attention_mask": chosen_enc["attention_mask"].squeeze(0).tolist(),
-            "chosen_labels": chosen_enc["input_ids"].squeeze(0).tolist(),
-
-            "rejected_input_ids": rejected_enc["input_ids"].squeeze(0).tolist(),
-            "rejected_attention_mask": rejected_enc["attention_mask"].squeeze(0).tolist(),
-            "rejected_labels": rejected_enc["input_ids"].squeeze(0).tolist(),
-            
+            "prompt": prompt_str,
+            "chosen": chosen_str,
+            "rejected": rejected_str,
             "margin": margin,
         })
 
@@ -220,7 +210,7 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    train_dataset = format_dataset(args.data_path, args.target, args.beta, args.omega, tokenizer)
+    train_dataset = format_dataset(args.data_path, args.target, args.beta, args.omega)
     margins = [x["margin"] for x in train_dataset]
     print(f"Loaded {len(train_dataset)} pairs. Margin stats: Mean={sum(margins)/len(margins):.4f}, Min={min(margins):.4f}, Max={max(margins):.4f}")
 
