@@ -13,7 +13,7 @@ import inspect
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import DPOConfig, DPOTrainer
-from trl.trainer.dpo_trainer import DPODataCollatorWithPadding
+from trl.trainer.utils import DPODataCollatorWithPadding
 from peft import LoraConfig, get_peft_model
 
 
