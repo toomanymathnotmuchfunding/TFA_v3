@@ -59,7 +59,7 @@ echo "=========================================================="
 python scripts/03_run_aft.py \
     --ref_model_path checkpoints/llama3_1_8b_sft_merged \
     --data_path data/omega_train.jsonl \
-    --directions_path data/spectral_subspaces.pt \
+    --directions_path data/spectral_subspaces_L16.pt \
     --arch "$CHOSEN_ARCH" \
     --target "$CHOSEN_TARGET" \
     --omega 1.0 \
