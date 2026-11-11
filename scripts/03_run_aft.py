@@ -12,7 +12,8 @@ import torch.nn.functional as F
 import inspect
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from trl import DPOConfig, DPOTrainer, DataCollatorForPreference
+from trl import DPOConfig, DPOTrainer
+from trl.trainer.dpo_trainer import DataCollatorForPreference
 from peft import LoraConfig, get_peft_model
 
 
@@ -45,12 +46,6 @@ def parse_args():
 
 
 class MarginDPODataCollator(DataCollatorForPreference):
-    """
-    Subclasses TRL collator to ensure the custom 'margin' scalar survives collation.
-    """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
     def __call__(self, features):
         batch = super().__call__(features)
         if "margin" in features[0]:
@@ -271,7 +266,7 @@ def main():
         precompute_ref_log_probs=True,
     )
 
-    data_collator = MarginDPODataCollator(tokenizer=tokenizer)
+    data_collator = MarginDPODataCollator(pad_token_id=tokenizer.pad_token_id)
     is_frozen_arm = "frozen" in args.arch
 
     # Inspect the *parent* class signature — RobustMarginDPOTrainer.__init__
