@@ -36,7 +36,7 @@ class MultiLayerHook:
         self.handles = []
         num_layers = len(model.model.layers)
         for i in range(num_layers):
-            layer_module = model.model.layers[i].self_attn.v_proj
+            layer_module = model.model.layers[i].mlp.up_proj
             self.handles.append(
                 layer_module.register_forward_hook(
                     lambda m, i, o, idx=i: self.hidden.__setitem__(idx, i[0].detach())

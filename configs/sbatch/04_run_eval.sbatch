@@ -34,4 +34,12 @@ python scripts/04_evaluate_and_regress.py \
     --results_dir results \
     --output_filename final_loss_regression_table.csv
 
-echo "Phase 4 Evaluation Complete. Results written to results/final_loss_regression_table.csv"
+echo ""
+echo "=== Phase 5: Post-Hoc Subspace Similarity Analysis ==="
+python scripts/05_post_hoc_similarity.py \
+    --checkpoints_dir checkpoints/aft_runs \
+    --data_dir data \
+    --target_layer 16 \
+    --cache_file data/hidden_states_L16.pt
+
+echo "Phase 4 & 5 Complete. Results and plots saved to results/."

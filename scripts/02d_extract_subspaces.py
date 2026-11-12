@@ -41,7 +41,7 @@ class RepresentationExtractor:
         self._register_hook()
 
     def _register_hook(self):
-        layer_module = self.model.model.layers[self.target_layer].self_attn.v_proj
+        layer_module = self.model.model.layers[self.target_layer].mlp.up_proj
 
         def hook_fn(module, input, output):
             # input[0] shape: (batch_size, seq_len, hidden_dim)

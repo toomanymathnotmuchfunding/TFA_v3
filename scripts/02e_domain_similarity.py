@@ -31,7 +31,7 @@ def parse_args():
 class Hook:
     def __init__(self, model, layer_idx):
         self.h = None
-        self.handle = model.model.layers[layer_idx].self_attn.v_proj.register_forward_hook(
+        self.handle = model.model.layers[layer_idx].mlp.up_proj.register_forward_hook(
             lambda m, i, o: setattr(self, "h", i[0].detach())
         )
     def remove(self):

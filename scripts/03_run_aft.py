@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument(
         "--target",
         type=str,
-        choices=["zero", "overcorrect"],
+        choices=["zero", "overcorrect", "max_align"],
         required=True,
     )
     parser.add_argument("--omega", type=float, default=1.0)
@@ -146,9 +146,8 @@ def format_dataset(jsonl_path, target_type, beta, omega):
     multiplier = 1.0 if target_type == "zero" else (1.0 + omega)
 
     for item in raw_items:
-        assert "b0" in item, "FATAL: 'b0' missing from training sample. Run 02b_profile_b0.py first."
+        assert "b0" in item, "FATAL: 'b0' missing from training sample."
         
-        # Provide raw text strings. TRL will handle the tokenization and masks.
         prompt_str = (
             f"<|start_header_id|>user<|end_header_id|>\n\n{item['prompt']}<|eot_id|>"
             f"<|start_header_id|>assistant<|end_header_id|>\n\n"
@@ -157,7 +156,12 @@ def format_dataset(jsonl_path, target_type, beta, omega):
         rejected_str = item["rejected"]
 
         b0_val = float(item["b0"])
-        margin = beta * multiplier * max(0.0, b0_val)
+        
+        if target_type == "max_align":
+            margin = 5.0  # Constant strong push for maximal alignment
+        else:
+            multiplier = 1.0 if target_type == "zero" else (1.0 + omega)
+            margin = beta * multiplier * max(0.0, b0_val)
 
         formatted.append({
             "prompt": prompt_str,
@@ -190,20 +194,18 @@ def inject_and_configure_lora(model, arch, directions_path, target_layer):
         peft_config = LoraConfig(
             r=4,
             lora_alpha=8,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            target_modules=["up_proj"], # Changed to MLP
             lora_dropout=0.0,
             bias="none",
             task_type="CAUSAL_LM",
         )
         return get_peft_model(model, peft_config)
 
-    # 1D Subspaces (frozen_shared, frozen_diff, train_shared, train_diff)
-    # Remove layers_to_transform to avoid PEFT regex matching bugs.
-    # We will apply LoRA to all layers, then manually freeze the ones we don't want.
+    # Subspace Arms (frozen_shared, frozen_diff, train_shared, train_diff)
     peft_config = LoraConfig(
-        r=1,
-        lora_alpha=1,
-        target_modules=["v_proj"],
+        r=4, # Increased rank
+        lora_alpha=8,
+        target_modules=["up_proj"], # Changed to MLP
         lora_dropout=0.0,
         bias="none",
         task_type="CAUSAL_LM",
@@ -211,18 +213,26 @@ def inject_and_configure_lora(model, arch, directions_path, target_layer):
     model = get_peft_model(model, peft_config)
 
     subspace_data = torch.load(directions_path, map_location="cpu", weights_only=True)
-    v_vec = subspace_data["v_shared"] if "shared" in arch else subspace_data["v_diff"]
-    v_vec = v_vec.float()
+    
+    # Extract the 4x4096 matrix to initialize LoRA A
+    if "shared" in arch:
+        v_matrix = subspace_data["V_topk"] # Shape: (4, 4096)
+    else:
+        # For diff, we use the 1D v_diff and pad it to rank 4
+        v_diff = subspace_data["v_diff"].unsqueeze(0) # Shape: (1, 4096)
+        v_matrix = torch.cat([v_diff, torch.zeros(3, v_diff.shape[1])], dim=0)
+        
+    v_matrix = v_matrix.float()
 
     matched_modules = 0
     for name, module in model.named_modules():
-        if hasattr(module, "lora_A") and "v_proj" in name:
+        if hasattr(module, "lora_A") and "up_proj" in name:
             is_target = str(target_layer) in name
             
             if is_target:
                 target_param = module.lora_A["default"].weight
                 with torch.no_grad():
-                    target_param.data.copy_(v_vec.to(target_param.dtype).unsqueeze(0))
+                    target_param.data.copy_(v_matrix.to(target_param.dtype))
 
                 if "frozen" in arch:
                     target_param.requires_grad = False
@@ -232,12 +242,10 @@ def inject_and_configure_lora(model, arch, directions_path, target_layer):
                     print(f"TRAINABLE: requires_grad=True on {name}.lora_A")
                 matched_modules += 1
             else:
-                # Freeze all non-target layers so only Layer 16 trains
                 module.lora_A["default"].weight.requires_grad = False
                 module.lora_B["default"].weight.requires_grad = False
 
-    assert matched_modules == 1, f"FATAL: Expected exactly 1 module matched for layer {target_layer}, got {matched_modules}!"
-
+    assert matched_modules == 1, f"FATAL: Expected exactly 1 module matched, got {matched_modules}!"
     return model
 
 
