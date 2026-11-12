@@ -146,11 +146,11 @@ def main():
 
     print("Running SVD on representation matrix...")
 
-    # H_A is (N, d). SVD returns Vh with shape (min(N, d), d) = (100, 4096)
-    U, S, Vh = torch.linalg.svd(H_A, full_matrices=False)
+    # 1. Concatenate both domains to find the true joint aligned direction
+    H_combined = torch.cat([H_A, H_B], dim=0)  # (N_A + N_B, d)
+    U, S, Vh = torch.linalg.svd(H_combined, full_matrices=False)
     
-    N_A = H_A.shape[0]
-    eigenvalues = (S ** 2) / N_A
+    eigenvalues = (S ** 2) / H_combined.shape[0]
 
     # Top-k eigenvectors of R_Omega: shape (k, d)
     V_topk = Vh[:args.rank_k, :].contiguous()
@@ -172,9 +172,7 @@ def main():
             "Differential direction is degenerate: ||mu_A - mu_B|| orthogonal to "
             f"v_shared is {v_diff_norm:.2e}. Domain A and Domain B share the same "
             "leading direction in this layer, so a 'differential' subspace is not "
-            "identifiable. Either (a) change --target_layer, (b) increase --rank_k "
-            "and inspect V_topk, or (c) report that the _diff arms are undefined "
-            "for this configuration."
+            "identifiable."
         )
     v_diff = v_diff / v_diff_norm
 

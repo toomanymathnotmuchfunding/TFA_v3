@@ -63,11 +63,6 @@ python scripts/03_run_aft.py \
     --arch "$CHOSEN_ARCH" \
     --target "$CHOSEN_TARGET" \
     --omega 1.0 \
-    --beta 0.1 \
-    --target_layer 16 \
-    --epochs 3 \
-    --batch_size 1 \
-    --grad_accum_steps 8 \
     --output_dir "$OUT_DIR"
 
 echo "Arm $RUN_NAME completed successfully."

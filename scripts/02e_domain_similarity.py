@@ -134,10 +134,14 @@ def main():
         print(f"  {label:<12} {pa:>10.3f} {pb:>10.3f} "
               f"{pa / nA:>8.2%} {pb / nB:>8.2%}")
 
+    # Recompute combined SVD for v_shared
+    H_combined = torch.cat([H_A, H_B], dim=0)
+    _, _, Vh_comb = torch.linalg.svd(H_combined, full_matrices=False)
+    
     for i in range(k):
-        row(f"V_topk[{i}]", Vh_A[i])
+        row(f"V_topk[{i}]", Vh_comb[i])
 
-    v_shared = Vh_A[0] / Vh_A[0].norm()
+    v_shared = Vh_comb[0] / Vh_comb[0].norm()
     v_diff_raw = mu_A - mu_B
     v_diff = v_diff_raw - (v_diff_raw @ v_shared) * v_shared
     v_diff = v_diff / (v_diff.norm() + 1e-12)

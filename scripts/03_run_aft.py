@@ -35,11 +35,11 @@ def parse_args():
         required=True,
     )
     parser.add_argument("--omega", type=float, default=1.0)
-    parser.add_argument("--beta", type=float, default=0.1)
+    parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--target_layer", type=int, default=16)
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--grad_accum_steps", type=int, default=8)
+    parser.add_argument("--grad_accum_steps", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=None)
     parser.add_argument("--output_dir", type=str, required=True)
     return parser.parse_args()
@@ -247,7 +247,7 @@ def main():
 
     lr = args.learning_rate
     if lr is None:
-        lr = 1e-5 if args.arch == "fft" else 5e-4
+        lr = 1e-5 if args.arch == "fft" else 2e-3
 
     print(f"Preparing Margin-DPO: Arch = {args.arch} | Target = {args.target} (omega = {args.omega})")
     print(f"Learning Rate: {lr} | Output Directory: {args.output_dir}")
