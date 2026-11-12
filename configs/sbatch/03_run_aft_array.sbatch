@@ -10,9 +10,23 @@
 #SBATCH --array=0-7%4
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --error=logs/%x_%A_%a.err
-# ... (keep your standard setup) ...
 
-# 4 Architectures x 2 Intensities = 8 Arms
+set -e
+
+PROJECT_DIR="$SLURM_SUBMIT_DIR"
+cd "$PROJECT_DIR"
+mkdir -p logs checkpoints/aft_runs
+
+# --- Robust Cluster Environment Activation ---
+if ! command -v conda &> /dev/null; then
+    module load miniforge 2>/dev/null || module load anaconda3 2>/dev/null || true
+fi
+eval "$(conda shell.bash hook)"
+conda activate msm_env
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# ---------------------------------------------
+
 ARCHS=(
     "frozen_shared" "frozen_shared"
     "frozen_diff"   "frozen_diff"
@@ -36,7 +50,6 @@ CHOSEN_ARCH="${ARCHS[$SLURM_ARRAY_TASK_ID]}"
 CHOSEN_TARGET="${TARGETS[$SLURM_ARRAY_TASK_ID]}"
 CHOSEN_EPOCHS="${EPOCHS[$SLURM_ARRAY_TASK_ID]}"
 
-# Standard vs Overtrained
 if [ "$CHOSEN_EPOCHS" -eq 10 ]; then
     RUN_NAME="${CHOSEN_ARCH}_standard"
 else
@@ -44,6 +57,10 @@ else
 fi
 
 OUT_DIR="checkpoints/aft_runs/${RUN_NAME}"
+
+echo "=========================================================="
+echo " Task ID: $SLURM_ARRAY_TASK_ID | Arm: $RUN_NAME"
+echo "=========================================================="
 
 python scripts/03_run_aft.py \
     --ref_model_path checkpoints/llama3_1_8b_sft_merged \
