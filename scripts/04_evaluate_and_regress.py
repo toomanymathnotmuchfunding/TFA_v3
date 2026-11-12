@@ -139,14 +139,14 @@ def generate_plots(df, output_dir, scatter_dir):
     plt.figure(figsize=(14, 6))
     df_melted = df.melt(
         id_vars=["run_name"],
-        value_vars=["L_Omega", "L_Domain_A_Heldout", "L_Domain_B_OOD"],
+        value_vars=["loss_Omega", "loss_Domain_A_Heldout", "loss_Domain_B_OOD"],
         var_name="Split",
         value_name="Loss",
     )
     df_melted["Split"] = df_melted["Split"].map({
-        "L_Omega": "Omega (Train)",
-        "L_Domain_A_Heldout": "Domain A (Heldout)",
-        "L_Domain_B_OOD": "Domain B (OOD)",
+        "loss_Omega": "Omega (Train)",
+        "loss_Domain_A_Heldout": "Domain A (Heldout)",
+        "loss_Domain_B_OOD": "Domain B (OOD)",
     })
     sns.barplot(data=df_melted, x="run_name", y="Loss", hue="Split", palette="viridis")
     plt.yscale("log")
