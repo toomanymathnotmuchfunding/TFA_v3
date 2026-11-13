@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 from scipy.stats import linregress
+from scipy.special import expit
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
@@ -43,7 +44,6 @@ def compute_sequence_logp(model, tokenizer, prompt, response):
     labels[:, :prompt_len] = -100
 
     outputs = model(enc_full, labels=labels)
-    # MEAN per-token log-prob (must match 02b_profile_b0.py)
     return -outputs.loss.item()
 
 
@@ -60,13 +60,14 @@ def evaluate_split(model, tokenizer, split_data, desc="Evaluating"):
     b1_arr = np.array(b1_vals, dtype=np.float64)
     b0_arr = np.array(b0_vals, dtype=np.float64)
 
-    loss = float(np.mean(b1_arr ** 2))
-    mean_b1, std_b1 = float(np.mean(b1_arr)), float(np.std(b1_arr))
+    p1_aligned = expit(-b1_arr)
+    p0_aligned = expit(-b0_arr)
+
+    mean_p1 = float(np.mean(p1_aligned))
+    mean_p0 = float(np.mean(p0_aligned))
 
     valid_mask = ~np.isnan(b0_arr)
     n_valid = int(valid_mask.sum())
-    mean_b0 = float(np.nanmean(b0_arr))
-    std_b0 = float(np.nanstd(b0_arr))
 
     if n_valid < max(10, len(split_data) // 2):
         raise RuntimeError(f"{desc}: only {n_valid}/{len(split_data)} samples have b0.")
@@ -78,11 +79,8 @@ def evaluate_split(model, tokenizer, split_data, desc="Evaluating"):
         slope, r2 = 0.0, 0.0
 
     return {
-        "loss": loss,
-        "mean_b1": mean_b1,
-        "std_b1": std_b1,
-        "mean_b0": mean_b0,
-        "std_b0": std_b0,
+        "mean_p_aligned_ref": mean_p0,
+        "mean_p_aligned_trained": mean_p1,
         "slope": float(slope),
         "r2": r2,
         "n_b0_valid": n_valid,
@@ -115,45 +113,53 @@ def generate_plots(df, output_dir, scatter_dir):
     os.makedirs(output_dir, exist_ok=True)
     sns.set_theme(style="whitegrid", context="talk")
 
-    # ---- Plot 1: b_0 distribution across splits (log-scale x) ----
-    # This shows WHY Omega is the "hard" training set.
-    plt.figure(figsize=(10, 5))
+    # ---- Plot 1: P(aligned) by split (Reference Model) ----
+    plt.figure(figsize=(8, 5))
     ax = plt.gca()
-    for label, col, color in [
-        ("Omega (Train, Top b0)", "mean_b0_Omega", "#d62728"),
-        ("Domain A Heldout", "mean_b0_Domain_A_Heldout", "#1f77b4"),
-        ("Domain B OOD", "mean_b0_Domain_B_OOD", "#2ca02c"),
-    ]:
-        if col in df.columns:
-            vals = df[col].dropna().values
-            ax.axvline(vals.mean(), color=color, linewidth=2, label=label, linestyle="--")
-    plt.axvline(0.0, color="black", linewidth=1, linestyle=":")
-    plt.xlabel("Mean per-token b0 (reference bias)")
-    plt.title("Baseline b0 by split — Omega is deliberately the misaligned tail")
-    plt.legend()
+    if len(df) > 0:
+        r = df.iloc[0]
+        labels = ["Omega (Train)", "Domain A (Heldout)", "Domain B (OOD)"]
+        vals = [
+            r.get("mean_p_aligned_ref_Omega", 0.0),
+            r.get("mean_p_aligned_ref_Domain_A_Heldout", 0.0),
+            r.get("mean_p_aligned_ref_Domain_B_OOD", 0.0)
+        ]
+        colors = ["#d62728", "#1f77b4", "#2ca02c"]
+        bars = ax.bar(labels, vals, color=colors, alpha=0.7)
+        for bar in bars:
+            yval = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2, yval + 0.02, f"{yval:.2%}", ha='center', va='bottom')
+            
+    plt.axhline(0.5, color="black", linewidth=1, linestyle=":")
+    plt.ylim(0, 1)
+    plt.ylabel("Mean P(aligned) under Reference Model")
+    plt.title("Reference Alignment Probability by Split")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "b0_distribution.png"), dpi=300)
+    plt.savefig(os.path.join(output_dir, "reference_p_aligned.png"), dpi=300)
     plt.close()
 
-    # ---- Plot 2: Loss across splits (log scale y) ----
+    # ---- Plot 2: P(aligned) across arms and splits ----
     plt.figure(figsize=(14, 6))
     df_melted = df.melt(
         id_vars=["run_name"],
-        value_vars=["loss_Omega", "loss_Domain_A_Heldout", "loss_Domain_B_OOD"],
+        value_vars=["mean_p_aligned_trained_Omega", "mean_p_aligned_trained_Domain_A_Heldout", "mean_p_aligned_trained_Domain_B_OOD"],
         var_name="Split",
-        value_name="Loss",
+        value_name="P_aligned",
     )
     df_melted["Split"] = df_melted["Split"].map({
-        "loss_Omega": "Omega (Train)",
-        "loss_Domain_A_Heldout": "Domain A (Heldout)",
-        "loss_Domain_B_OOD": "Domain B (OOD)",
+        "mean_p_aligned_trained_Omega": "Omega (Train)",
+        "mean_p_aligned_trained_Domain_A_Heldout": "Domain A (Heldout)",
+        "mean_p_aligned_trained_Domain_B_OOD": "Domain B (OOD)",
     })
-    sns.barplot(data=df_melted, x="run_name", y="Loss", hue="Split", palette="viridis")
-    plt.yscale("log")
+    sns.barplot(data=df_melted, x="run_name", y="P_aligned", hue="Split", palette="viridis")
+    plt.axhline(0.5, color="black", linewidth=1, linestyle=":", label="Coin flip (50%)")
+    plt.ylim(0, 1)
     plt.xticks(rotation=45, ha="right")
-    plt.title("Quadratic Loss across arms and splits (log scale)")
+    plt.ylabel("Mean P(aligned)")
+    plt.title("Trained Alignment Probability across Arms and Splits")
+    plt.legend(loc='lower right')
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "loss_comparison.png"), dpi=300)
+    plt.savefig(os.path.join(output_dir, "p_aligned_comparison.png"), dpi=300)
     plt.close()
 
     # ---- Plot 3: OOD shrinkage slopes ----
@@ -169,8 +175,7 @@ def generate_plots(df, output_dir, scatter_dir):
     plt.savefig(os.path.join(output_dir, "ood_slope.png"), dpi=300)
     plt.close()
 
-    # ---- Plot 4: Per-arm b0 vs b1 scatter on OOD ----
-    # This is the "money plot" — visually shows whether the arm shrinks, rotates, or ignores OOD.
+    # ---- Plot 4: Per-arm P(aligned) scatter on OOD ----
     available = sorted(glob.glob(os.path.join(scatter_dir, "*_Domain_B_OOD.npz")))
     if available:
         n_arms = len(available)
@@ -178,43 +183,36 @@ def generate_plots(df, output_dir, scatter_dir):
         n_rows = (n_arms + n_cols - 1) // n_cols
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows), squeeze=False)
 
-        # Global bounds for consistent axes
-        all_b0, all_b1 = [], []
-        for path in available:
-            d = np.load(path)
-            mask = ~np.isnan(d["b0"])
-            all_b0.append(d["b0"][mask])
-            all_b1.append(d["b1"][mask])
-        all_b0 = np.concatenate(all_b0)
-        all_b1 = np.concatenate(all_b1)
-        lo = float(min(all_b0.min(), all_b1.min())) - 0.5
-        hi = float(max(all_b0.max(), all_b1.max())) + 0.5
-
         for i, path in enumerate(available):
             ax = axes[i // n_cols, i % n_cols]
             name = os.path.basename(path).replace("_Domain_B_OOD.npz", "")
             d = np.load(path)
             mask = ~np.isnan(d["b0"])
-            ax.scatter(d["b0"][mask], d["b1"][mask], alpha=0.35, s=10, color="steelblue")
-            # Identity line (no change) and flat line (full shrinkage)
-            ax.plot([lo, hi], [lo, hi], "r--", linewidth=1, label="No change")
-            ax.axhline(0.0, color="green", linestyle=":", linewidth=1, label="Full shrinkage")
-            ax.set_xlim(lo, hi)
-            ax.set_ylim(lo, hi)
+            
+            b0 = d["b0"][mask]
+            b1 = d["b1"][mask]
+            p0 = expit(-b0)
+            p1 = expit(-b1)
+            
+            ax.scatter(p0, p1, alpha=0.35, s=10, color="steelblue")
+            ax.plot([0, 1], [0, 1], "r--", linewidth=1, label="No change")
+            ax.axhline(0.5, color="green", linestyle=":", linewidth=1, label="50% aligned")
+            
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
             ax.set_title(name, fontsize=11)
-            ax.set_xlabel("b0 (reference)")
-            ax.set_ylabel("b1 (trained)")
+            ax.set_xlabel("P(aligned | reference)")
+            ax.set_ylabel("P(aligned | trained)")
             ax.grid(alpha=0.3)
             if i == 0:
                 ax.legend(fontsize=8)
 
-        # Hide unused subplots
         for j in range(n_arms, n_rows * n_cols):
             axes[j // n_cols, j % n_cols].axis("off")
 
-        fig.suptitle("OOD: b1 vs b0 per arm — where does the trained model land?", fontsize=14)
+        fig.suptitle("OOD: P(aligned) before vs after training", fontsize=14)
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, "ood_b0_vs_b1.png"), dpi=300)
+        plt.savefig(os.path.join(output_dir, "ood_p_aligned.png"), dpi=300)
         plt.close()
 
 
@@ -257,7 +255,6 @@ def main():
             for k, v in metrics.items():
                 row[f"{k}_{split_name}"] = v
 
-            # Save per-sample (b0, b1) for later scatter plots
             np.savez(
                 os.path.join(scatter_dir, f"{run_name}_{split_name}.npz"),
                 b0=b0_arr,
